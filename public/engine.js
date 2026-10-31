@@ -209,16 +209,25 @@ export function summarize(session, now = Date.now()) {
 }
 
 export function isValidSession(value) {
-  if (!value || typeof value !== 'object' || value.version !== 1 || typeof value.id !== 'string' || value.id.length > 200) return false;
+  const validLevel = (n) => Number.isInteger(n) && n >= 1 && n <= MAX_LEVEL;
+  const validString = (s) => typeof s === 'string' && s.length > 0 && s.length <= 1000;
+  const validDate = (s) => typeof s === 'string' && Number.isFinite(Date.parse(s));
+  const validTime = (n) => Number.isFinite(n) && n >= 0 && n <= value.totalMs;
+  const validAnswer = (a) => a === null || typeof a === 'string' && a.length <= 5000 || Number.isFinite(a) || Array.isArray(a) && a.length <= 32 && a.every((x) => typeof x === 'string' && x.length <= 200 || Number.isFinite(x));
+  const validOrder = (a) => Array.isArray(a) && a.length <= 20 && a.every(validString);
+  const validGenerated = (q) => q === null || q && validString(q.id) && q.sourceId === 'generated' && q.category === 'memory' && q.type === 'memory-grid' && validLevel(q.level) && q.gridRows === 4 && q.gridColumns === 4 && Array.isArray(q.sequence) && q.sequence.length >= 2 && q.sequence.length <= 9 && q.sequence.every((n) => Number.isInteger(n) && n >= 1 && n <= 16) && Array.isArray(q.answer) && q.answer.length === q.sequence.length && q.answer.every((n, i) => n === q.sequence[i]);
+  const validQuestion = (q) => q && validString(q.questionId) && validString(q.sourceId) && CATEGORIES.some((c) => c.id === q.category) && ['choice', 'construction', 'memory-grid', 'memory-digits', 'memory-binding', 'folding-video'].includes(q.type) && validLevel(q.presentedLevel) && validOrder(q.choicesOrder) && validGenerated(q.generatedQuestion);
+  if (!value || typeof value !== 'object' || value.version !== 1 || !validString(value.id) || value.id.length > 200) return false;
   if (!['running', 'paused', 'completed', 'stopped'].includes(value.status)) return false;
-  if (!Number.isFinite(Date.parse(value.startedAt)) || !Number.isFinite(value.updatedAt)) return false;
+  if (!validDate(value.startedAt) || !Number.isFinite(value.updatedAt) || value.finishedAt !== null && !validDate(value.finishedAt)) return false;
   if (!Number.isFinite(value.totalMs) || value.totalMs < 240000 || value.totalMs > 10800000 || value.sectionMs !== value.totalMs / 4) return false;
-  if (!Number.isFinite(value.elapsedMs) || value.elapsedMs < 0 || value.elapsedMs > value.totalMs) return false;
+  if (!validTime(value.elapsedMs) || value.status === 'running' && !Number.isFinite(value.anchorAt)) return false;
   if (!Number.isInteger(value.sectionIndex) || value.sectionIndex < 0 || value.sectionIndex > 4) return false;
-  if (!value.levels || !CATEGORIES.every((c) => Number.isInteger(value.levels[c.id]) && value.levels[c.id] >= 1 && value.levels[c.id] <= MAX_LEVEL)) return false;
+  if (value.sectionIndex === 4 && value.status !== 'completed') return false;
+  if (!value.levels || !CATEGORIES.every((c) => validLevel(value.levels[c.id]))) return false;
   if (!Array.isArray(value.responses) || value.responses.length > 20000) return false;
-  if (!value.responses.every((r) => r && typeof r.questionId === 'string' && CATEGORIES.some((c) => c.id === r.category) && ['correct', 'incorrect', 'skipped', 'unanswered'].includes(r.status) && Number.isFinite(r.timeMs) && r.timeMs >= 0)) return false;
-  if (value.current !== null && (typeof value.current !== 'object' || typeof value.current.questionId !== 'string' || !CATEGORIES.some((c) => c.id === value.current.category))) return false;
+  if (!value.responses.every((r) => validQuestion(r) && ['correct', 'incorrect', 'skipped', 'unanswered'].includes(r.status) && validTime(r.timeMs) && validTime(r.elapsedAtAnswer) && validDate(r.answeredAt) && validLevel(r.levelBefore) && validLevel(r.levelAfter) && validAnswer(r.answer) && [true, false, null].includes(r.correct))) return false;
+  if (value.current !== null && (!validQuestion(value.current) || !validTime(value.current.askedAtElapsed) || typeof value.current.answered !== 'boolean' || !validAnswer(value.current.draft) || value.current.presentationAtElapsed !== null && !validTime(value.current.presentationAtElapsed))) return false;
   return true;
 }
 

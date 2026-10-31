@@ -156,3 +156,23 @@ test('backup round trip preserves per-question data; malformed import rejects al
   const broken = { ...session, totalMs: -1 };
   assert.throws(() => parseBackup(JSON.stringify({ app: 'cognitive-practice', version: 1, sessions: [broken] })));
 });
+
+test('backup rejects unsafe display fields and invalid memory snapshots before import', () => {
+  let session = beginQuestion(createSession(40, NOW, 'validation'), choice(), NOW);
+  session = submitAnswer(session, choice(), 'A', NOW + 1).session;
+  assert.equal(isValidSession(session), true);
+  for (const change of [
+    (s) => { s.responses[0].presentedLevel = '<img src=x onerror=alert(1)>'; },
+    (s) => { s.responses[0].levelAfter = '<svg onload=alert(1)>'; },
+    (s) => { s.current.choicesOrder = 'A'; },
+    (s) => { s.current.presentationAtElapsed = 'invalid'; },
+  ]) {
+    const broken = structuredClone(session); change(broken);
+    assert.equal(isValidSession(broken), false);
+  }
+  let memory = advanceSession(createSession(4, NOW, 'generated-backup'), NOW + 60000);
+  memory = beginQuestion(memory, generatedMemory(3, () => 0, 'safe'), NOW + 60000);
+  assert.equal(isValidSession(memory), true);
+  memory.current.generatedQuestion.gridColumns = '4;background:url(https://example.com)';
+  assert.equal(isValidSession(memory), false);
+});
