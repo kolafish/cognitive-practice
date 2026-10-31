@@ -5,15 +5,46 @@ export const CATEGORIES = [
   { id: 'verbal', name: '文字推演', short: '文字', number: '04', description: '理解条件，推断顺序与词语关系。' },
 ];
 export const MAX_LEVEL = 8;
+export const MEMORY_DISPLAY_MS = 1000;
+export const TRAINING_WEIGHTS = [4, 2, 3, 3];
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const copy = (value) => structuredClone(value);
+
+export function trainingDurations(totalMs) {
+  const durations = TRAINING_WEIGHTS.slice(0, -1).map((weight) => Math.round(totalMs * weight / 12));
+  return [...durations, totalMs - durations.reduce((sum, duration) => sum + duration, 0)];
+}
+
+export function sectionDurations(session) {
+  // Version 1 records and unfinished sessions keep their original equal allocation.
+  return session.version === 1 ? CATEGORIES.map(() => session.sectionMs) : session.sectionDurationsMs;
+}
+
+export function sectionTiming(session, index = session.sectionIndex) {
+  const durations = sectionDurations(session);
+  const start = durations.slice(0, index).reduce((sum, duration) => sum + duration, 0);
+  const duration = durations[index] ?? 0;
+  return { start, duration, end: start + duration };
+}
+
+export function sectionIndexAt(session, now = Date.now()) {
+  const elapsed = elapsedTime(session, now);
+  let end = 0;
+  const durations = sectionDurations(session);
+  for (let index = 0; index < durations.length; index++) {
+    end += durations[index];
+    if (elapsed < end) return index;
+  }
+  return CATEGORIES.length;
+}
 
 export function createSession(minutes, now = Date.now(), id = crypto.randomUUID()) {
   if (!Number.isFinite(minutes) || minutes < 4 || minutes > 180) throw new Error('总时间应为 4–180 分钟。');
   const totalMs = Math.round(minutes * 60000);
   return {
-    version: 1, id, status: 'running', startedAt: new Date(now).toISOString(), updatedAt: now,
-    finishedAt: null, totalMs, sectionMs: totalMs / 4, elapsedMs: 0, anchorAt: now,
+    version: 2, id, status: 'running', startedAt: new Date(now).toISOString(), updatedAt: now,
+    finishedAt: null, totalMs, sectionDurationsMs: trainingDurations(totalMs),
+    memoryDisplayMs: MEMORY_DISPLAY_MS, elapsedMs: 0, anchorAt: now,
     sectionIndex: 0, levels: Object.fromEntries(CATEGORIES.map((c) => [c.id, 1])),
     responses: [], current: null,
   };
@@ -25,8 +56,30 @@ export function elapsedTime(session, now = Date.now()) {
 }
 
 export function categoryAt(session, now = Date.now()) {
-  const index = Math.floor(elapsedTime(session, now) / session.sectionMs);
-  return CATEGORIES[index] ?? null;
+  return CATEGORIES[sectionIndexAt(session, now)] ?? null;
+}
+
+export function memoryDisplayDuration(session, question) {
+  return session.memoryDisplayMs ?? question.displayMs ?? (session.version === 1 ? question.type === 'memory-binding' ? 1995 : 850 : MEMORY_DISPLAY_MS);
+}
+
+export function memoryStage(session, question, current = session.current, now = Date.now()) {
+  if (current.presentationAtElapsed === null) return { phase: 'ready', key: 'ready' };
+  const elapsed = Math.max(0, elapsedTime(session, now) - current.presentationAtElapsed);
+  const display = memoryDisplayDuration(session, question);
+  if (question.type === 'memory-binding') {
+    const delay = question.delayMs ?? 995;
+    if (elapsed < display) return { phase: 'target', key: 'target' };
+    if (elapsed < display + delay) return { phase: 'hold', key: 'hold', left: display + delay - elapsed };
+    return { phase: 'answer', key: 'answer' };
+  }
+  const lead = 600;
+  const interval = question.intervalMs ?? 250;
+  if (elapsed < lead) return { phase: 'lead', key: 'lead' };
+  const index = Math.floor((elapsed - lead) / (display + interval));
+  if (index >= question.sequence.length) return { phase: 'answer', key: 'answer' };
+  const lit = (elapsed - lead) % (display + interval) < display;
+  return { phase: 'present', index, lit, key: `present-${index}-${lit}` };
 }
 
 function unanswered(session, atElapsed, now, reason) {
@@ -50,9 +103,9 @@ export function advanceSession(session, now = Date.now()) {
   if (next.status !== 'running') return next;
   next.anchorAt = now;
   next.updatedAt = now;
-  const index = Math.min(4, Math.floor(next.elapsedMs / next.sectionMs));
+  const index = sectionIndexAt(next, now);
   if (index !== next.sectionIndex) {
-    unanswered(next, Math.min((next.sectionIndex + 1) * next.sectionMs, next.totalMs), now, 'section_timeout');
+    unanswered(next, sectionTiming(next).end, now, 'section_timeout');
     next.current = null;
     next.sectionIndex = index;
   }
@@ -190,6 +243,7 @@ export function submitAnswer(session, question, answer, now = Date.now(), skippe
 export function summarize(session, now = Date.now()) {
   const elapsed = elapsedTime(session, now);
   const sections = CATEGORIES.map((category, index) => {
+    const timing = sectionTiming(session, index);
     const responses = session.responses.filter((r) => r.category === category.id);
     const correct = responses.filter((r) => r.status === 'correct').length;
     const incorrect = responses.filter((r) => r.status === 'incorrect').length;
@@ -197,7 +251,7 @@ export function summarize(session, now = Date.now()) {
       skipped: responses.filter((r) => r.status === 'skipped').length,
       unanswered: responses.filter((r) => r.status === 'unanswered').length,
       attempted: correct + incorrect,
-      timeMs: clamp(elapsed - index * session.sectionMs, 0, session.sectionMs),
+      timeMs: clamp(elapsed - timing.start, 0, timing.duration), plannedMs: timing.duration,
       finalLevel: session.levels[category.id],
     };
   });
@@ -217,10 +271,12 @@ export function isValidSession(value) {
   const validOrder = (a) => Array.isArray(a) && a.length <= 20 && a.every(validString);
   const validGenerated = (q) => q === null || q && validString(q.id) && q.sourceId === 'generated' && q.category === 'memory' && q.type === 'memory-grid' && validLevel(q.level) && q.gridRows === 4 && q.gridColumns === 4 && Array.isArray(q.sequence) && q.sequence.length >= 2 && q.sequence.length <= 9 && q.sequence.every((n) => Number.isInteger(n) && n >= 1 && n <= 16) && Array.isArray(q.answer) && q.answer.length === q.sequence.length && q.answer.every((n, i) => n === q.sequence[i]);
   const validQuestion = (q) => q && validString(q.questionId) && validString(q.sourceId) && CATEGORIES.some((c) => c.id === q.category) && ['choice', 'construction', 'memory-grid', 'memory-digits', 'memory-binding', 'folding-video'].includes(q.type) && validLevel(q.presentedLevel) && validOrder(q.choicesOrder) && validGenerated(q.generatedQuestion);
-  if (!value || typeof value !== 'object' || value.version !== 1 || !validString(value.id) || value.id.length > 200) return false;
+  if (!value || typeof value !== 'object' || ![1, 2].includes(value.version) || !validString(value.id) || value.id.length > 200) return false;
   if (!['running', 'paused', 'completed', 'stopped'].includes(value.status)) return false;
   if (!validDate(value.startedAt) || !Number.isFinite(value.updatedAt) || value.finishedAt !== null && !validDate(value.finishedAt)) return false;
-  if (!Number.isFinite(value.totalMs) || value.totalMs < 240000 || value.totalMs > 10800000 || value.sectionMs !== value.totalMs / 4) return false;
+  if (!Number.isFinite(value.totalMs) || value.totalMs < 240000 || value.totalMs > 10800000) return false;
+  if (value.version === 1 && value.sectionMs !== value.totalMs / 4) return false;
+  if (value.version === 2 && (!Array.isArray(value.sectionDurationsMs) || value.sectionDurationsMs.length !== 4 || !value.sectionDurationsMs.every((duration, i) => duration === trainingDurations(value.totalMs)[i]) || value.memoryDisplayMs !== MEMORY_DISPLAY_MS)) return false;
   if (!validTime(value.elapsedMs) || value.status === 'running' && !Number.isFinite(value.anchorAt)) return false;
   if (!Number.isInteger(value.sectionIndex) || value.sectionIndex < 0 || value.sectionIndex > 4) return false;
   if (value.sectionIndex === 4 && value.status !== 'completed') return false;

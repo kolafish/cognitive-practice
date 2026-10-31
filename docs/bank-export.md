@@ -75,7 +75,7 @@ ACCES's 51 images are excluded pending explicit redistribution permission. No ag
 
 Folding videos ask only for the total hole count, a derived question from the original structured-answer task; full original answers and answer images are retained.
 
-Tatool sequences containing positions up to 16 use an adapted 4×4 grid with row-major 1-based positions. The 850 ms display / 250 ms interval is a practice setting, not a reconstruction of source norms.
+Tatool sequences containing positions up to 16 use an adapted 4×4 grid with row-major 1-based positions. The bank retains its earlier 850 ms display / 250 ms interval settings, not a reconstruction of source norms. New version 2 practice sessions override memory display durations to 1000 ms per item (or per binding target image), retain the question's inter-item and retention intervals, and save the actual display setting with the session. Version 1 records and unfinished sessions retain their earlier timing.
 
 Some spatial items need the original English text to preserve specific motion, view, or composition conditions. Show originalPromptEn visibly when promptNeedsOriginal=true. Embedded A–D labels must retain their source IDs and order.
 

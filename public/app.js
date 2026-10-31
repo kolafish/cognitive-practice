@@ -1,7 +1,7 @@
 import {
   CATEGORIES, MAX_LEVEL, createSession, elapsedTime, advanceSession, pauseSession, resumeSession,
   finishSession, snapshotSession, chooseQuestion, generatedMemory, beginQuestion, submitAnswer,
-  summarize,
+  summarize, trainingDurations, sectionTiming, sectionIndexAt, memoryDisplayDuration, memoryStage as computeMemoryStage,
 } from './engine.js';
 import { openStore, readCheckpoint, saveCheckpoint, readPreferences, savePreferences } from './storage.js';
 
@@ -77,14 +77,14 @@ function activeCandidate() { return sessions.find((s) => ['paused', 'running'].i
 
 function home() {
   const pending = activeCandidate();
-  const sectionTime = duration(minutes * 60000 / 4);
+  const timings = trainingDurations(minutes * 60000);
   return shell(`
     ${pending ? `<section class="resume-banner"><div><strong>还有一段练习，可以接着完成</strong><p>${dateLabel(pending.startedAt)}开始 · 已练习 ${duration(pending.elapsedMs)}</p></div><div class="button-row"><button class="ghost" data-action="stop-pending" data-id="${esc(pending.id)}">结束这次</button><button class="primary" data-action="resume" data-id="${esc(pending.id)}">继续练习 ${arrow}</button></div></section>` : ''}
     ${loadError ? `<div class="error-banner">${esc(loadError)} <button class="ghost" data-action="reload">重新加载</button></div>` : ''}
     ${storageError ? `<div class="error-banner">${esc(storageError)}</div>` : ''}
-    <section class="hero"><div><div class="eyebrow">四类能力 · 自适应练习</div><h1>从一小步开始，<br>让思维慢慢展开。</h1><p class="lead">选择一段专注的时间。图形、记忆、空间与文字依次练习，题目会随着你的作答，逐步调整难度。</p><div class="hero-notes"><span>${icons.clock}四类平均分配时间</span><span>${icons.save}逐题记录，随时回看</span></div></div><div class="hero-art" aria-hidden="true">${CATEGORIES.map((c) => `<div class="art-card">${icons[c.id]}<small>${c.name}</small></div>`).join('')}<div class="art-tag"><b>1 → 8</b>从简单题开始</div></div></section>
-    <section><div class="section-heading"><h2>四段专注，一次完整练习</h2><span class="quiet">${bank ? `${number(bank.stats.total)} 道题已就绪` : '正在加载题库…'}</span></div><div class="category-grid">${CATEGORIES.map((c) => `<article class="category-card"><div class="category-top"><span class="category-icon">${icons[c.id]}</span><span class="category-number">${c.number}</span></div><h3>${c.name}</h3><p>${c.description}</p><div class="category-foot"><span>${bank ? `${number(bank.categories[c.id].length)} 道题` : '准备中'}</span><b data-section-duration>${sectionTime}</b></div></article>`).join('')}</div></section>
-    <section class="setup"><div><h2>这次，留多少时间给自己？</h2><div class="preset-row">${[20, 40, 60].map((value) => `<button data-action="duration" data-value="${value}" class="preset ${minutes === value ? 'selected' : ''}">${value} 分钟</button>`).join('')}<label class="custom-duration">自定义 <input id="minutes" type="number" min="4" max="180" step="1" value="${minutes}" aria-label="总练习分钟数"> 分钟</label></div><p class="quiet">每类 <span data-section-duration>${sectionTime}</span>，答对升一档，答错降一档。</p></div><div class="setup-action"><button class="primary start-button" data-action="start" ${!bank || !store || pending ? 'disabled' : ''}><span id="start-label">${bank ? `开始 ${minutes} 分钟练习` : '正在准备题库…'}</span>${arrow}</button><p class="quiet">${pending ? '先继续或结束未完成的练习' : '可以暂停 · 关闭页面后可恢复进度'}</p></div></section>
+    <section class="hero"><div><div class="eyebrow">四类能力 · 自适应练习</div><h1>从一小步开始，<br>让思维慢慢展开。</h1><p class="lead">选择一段专注的时间。图形、记忆、空间与文字依次练习，题目会随着你的作答，逐步调整难度。</p><div class="hero-notes"><span>${icons.clock}20∶10∶15∶15 训练配比</span><span>${icons.save}逐题记录，随时回看</span></div></div><div class="hero-art" aria-hidden="true">${CATEGORIES.map((c) => `<div class="art-card">${icons[c.id]}<small>${c.name}</small></div>`).join('')}<div class="art-tag"><b>1 → 8</b>从简单题开始</div></div></section>
+    <section><div class="section-heading"><h2>四段专注，一次完整练习</h2><span class="quiet">${bank ? `${number(bank.stats.total)} 道题已就绪` : '正在加载题库…'}</span></div><div class="category-grid">${CATEGORIES.map((c, index) => `<article class="category-card"><div class="category-top"><span class="category-icon">${icons[c.id]}</span><span class="category-number">${c.number}</span></div><h3>${c.name}</h3><p>${c.description}</p><div class="category-foot"><span>${bank ? `${number(bank.categories[c.id].length)} 道题` : '准备中'}</span><b data-section-duration="${index}">${duration(timings[index])}</b></div></article>`).join('')}</div></section>
+    <section class="setup"><div><h2>这次，留多少时间给自己？</h2><div class="preset-row">${[40, 60, 90].map((value) => `<button data-action="duration" data-value="${value}" class="preset ${minutes === value ? 'selected' : ''}">${value} 分钟</button>`).join('')}<label class="custom-duration">自定义 <input id="minutes" type="number" min="4" max="180" step="1" value="${minutes}" aria-label="总练习分钟数"> 分钟</label></div><p class="quiet">按 20∶10∶15∶15 分配时间（模拟训练方案）。记忆材料每次展示 1 秒，之后在本段剩余时间内作答。</p></div><div class="setup-action"><button class="primary start-button" data-action="start" ${!bank || !store || pending ? 'disabled' : ''}><span id="start-label">${bank ? `开始 ${minutes} 分钟练习` : '正在准备题库…'}</span>${arrow}</button><p class="quiet">${pending ? '先继续或结束未完成的练习' : '可以暂停 · 关闭页面后可恢复进度'}</p></div></section>
   `, 'home');
 }
 
@@ -101,27 +101,11 @@ function history() {
 }
 
 function about() {
-  return shell(`<div class="page-heading"><div><div class="eyebrow">轻松上手</div><h1>怎样练，怎样记录</h1><p>按自己的节奏，完成四类思维练习。</p></div></div><div class="help-grid"><section class="help-card"><h2>时间平均分成四段</h2><p>先图形，再记忆，然后空间，最后文字。例如设置40分钟，每类10分钟。每段时间到后自动进入下一类，不会把剩余时间挪给其他类别。暂停时所有计时都会停止。</p></section><section class="help-card"><h2>答对升级，答错降级</h2><p>四类题各自从1档开始，答对升一档，答错或跳过降一档，范围为1–8档。如果该档没有可用题，会选择最近的档位。同一段练习优先避免重复题及重复情境。</p></section><section class="help-card"><h2>练习档位怎样确定</h2><p>1–8档是练习分档，综合原始难度、题目结构或估算结果，不是年龄常模或智商分数。每道题均保留原始难度依据。部分空间题的条件依赖英文，会同时展示英文原文；动画折纸题在本练习中只判断孔数。</p></section><section class="help-card"><h2>记录由你自己保管</h2><p>每次记录开始日期、实际用时、四类用时，以及逐题答案、正确与否、作答时长和档位变化。作答后自动保存；导出备份可以迁移设备，导入不会清除已有记录。站点不向服务器上传练习记录。</p></section><section class="help-card"><h2>记忆题怎么操作</h2><p>点击“开始记忆”后，等待方格或数字依次呈现，结束后再作答。方格题按顺序点击，数字题用空格分隔。位置绑定题先看目标图、等待间隔，再判断探测图是否相符。每次只呈现一遍，暂停可以停住进度。</p></section><section class="help-card"><h2>关闭页面也能继续</h2><p>练习中每秒保留进度检查点，回到网站后选择“继续练习”即可。记录里的实际用时不包含暂停或关闭网页的时间。浏览器无可用存储时会提示，避免开始一场无法保存的练习。</p></section></div><div class="section-heading"><h2>题库来源</h2><a class="quiet" href="attributions.html">完整许可与署名 →</a></div><div class="source-grid">${(bank?.sources ?? []).map((s) => `<div class="source-card"><a href="${safeLink(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.name)}</a><p>${esc(s.license)}</p></div>`).join('')}</div>`, 'about');
+  return shell(`<div class="page-heading"><div><div class="eyebrow">轻松上手</div><h1>怎样练，怎样记录</h1><p>按自己的节奏，完成四类思维练习。</p></div></div><div class="help-grid"><section class="help-card"><h2>按模拟训练配比分配时间</h2><p>默认60分钟：图形20分钟、记忆10分钟、空间15分钟、文字15分钟。其他总时长按相同比例缩放；90分钟分别为30、15、22分30秒、22分30秒。每段到时自动切换，暂停停止计时。这是模拟训练配比，不代表官方考试安排；旧版练习沿用创建时的均分方案。</p></section><section class="help-card"><h2>答对升级，答错降级</h2><p>四类题各自从1档开始，答对升一档，答错或跳过降一档，范围为1–8档。如果该档没有可用题，会选择最近的档位。同一段练习优先避免重复题及重复情境。</p></section><section class="help-card"><h2>练习档位怎样确定</h2><p>1–8档是练习分档，综合原始难度、题目结构或估算结果，不是年龄常模或智商分数。每道题均保留原始难度依据。部分空间题的条件依赖英文，会同时展示英文原文；动画折纸题在本练习中只判断孔数。</p></section><section class="help-card"><h2>记录由你自己保管</h2><p>每次记录开始日期、实际用时、四类用时，以及逐题答案、正确与否、作答时长和档位变化。作答后自动保存；导出备份可以迁移设备，导入不会清除已有记录。站点不向服务器上传练习记录。</p></section><section class="help-card"><h2>记忆题怎么操作</h2><p>新练习中，每个方格、每个数字或位置绑定的目标图均展示1秒。序列逐项呈现，绑定题保留原来的保持间隔，呈现结束后在记忆段的剩余时间内作答。方格按顺序点击，数字用空格分隔。展示时间不随难度缩短，暂停可以停住进度。</p></section><section class="help-card"><h2>关闭页面也能继续</h2><p>练习中每秒保留进度检查点，回到网站后选择“继续练习”即可。记录里的实际用时不包含暂停或关闭网页的时间。浏览器无可用存储时会提示，避免开始一场无法保存的练习。</p></section></div><div class="section-heading"><h2>题库来源</h2><a class="quiet" href="attributions.html">完整许可与署名 →</a></div><div class="source-grid">${(bank?.sources ?? []).map((s) => `<div class="source-card"><a href="${safeLink(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.name)}</a><p>${esc(s.license)}</p></div>`).join('')}</div>`, 'about');
 }
 
 function memoryStage(question, current, now = Date.now()) {
-  if (current.presentationAtElapsed === null) return { phase: 'ready', key: 'ready' };
-  const elapsed = Math.max(0, elapsedTime(session, now) - current.presentationAtElapsed);
-  if (question.type === 'memory-binding') {
-    const display = question.displayMs ?? 1995;
-    const delay = question.delayMs ?? 995;
-    if (elapsed < display) return { phase: 'target', key: 'target' };
-    if (elapsed < display + delay) return { phase: 'hold', key: 'hold', left: display + delay - elapsed };
-    return { phase: 'answer', key: 'answer' };
-  }
-  const lead = 600;
-  const display = question.displayMs ?? 850;
-  const interval = question.intervalMs ?? 250;
-  if (elapsed < lead) return { phase: 'lead', key: 'lead' };
-  const index = Math.floor((elapsed - lead) / (display + interval));
-  if (index >= question.sequence.length) return { phase: 'answer', key: 'answer' };
-  const lit = (elapsed - lead) % (display + interval) < display;
-  return { phase: 'present', index, lit, key: `present-${index}-${lit}` };
+  return computeMemoryStage(session, question, current, now);
 }
 
 function choiceButtons(question, draft, order, disabled = false) {
@@ -138,7 +122,7 @@ function memoryMarkup(question, current) {
   const stage = memoryStage(question, current);
   lastMemoryVisual = `${question.id}:${stage.key}`;
   const draft = Array.isArray(current.draft) ? current.draft : [];
-  if (stage.phase === 'ready') return `<div class="memory-area"><span class="category-icon">${icons.memory}</span><h2>先看清，再记住</h2><p>${question.type === 'memory-binding' ? '看目标图，等待后判断字母与位置是否相符。' : `将依次呈现${question.sequence.length}个${question.type === 'memory-grid' ? '位置' : '数字'}，呈现结束后再作答。`}</p><button class="primary" data-action="begin-memory">开始记忆 ${arrow}</button></div>`;
+  if (stage.phase === 'ready') return `<div class="memory-area"><span class="category-icon">${icons.memory}</span><h2>先看清，再记住</h2><p>${question.type === 'memory-binding' ? `目标图展示 ${memoryDisplayDuration(session, question) / 1000} 秒，等待后判断字母与位置是否相符。` : `将依次呈现${question.sequence.length}个${question.type === 'memory-grid' ? '位置' : '数字'}，每个展示 ${memoryDisplayDuration(session, question) / 1000} 秒。`}</p><p class="quiet">呈现结束后，在本段剩余时间内作答。</p><button class="primary" data-action="begin-memory">开始记忆 ${arrow}</button></div>`;
   if (question.type === 'memory-binding') {
     if (stage.phase === 'target') return `<div class="memory-area"><div class="memory-status">记住字母与它的位置</div><img class="binding-image" src="${safeAsset(question.image)}" alt="请记住目标图中的字母与位置"></div>`;
     if (stage.phase === 'hold') return '<div class="memory-area"><span class="memory-digit" aria-label="请保持记忆">＋</span><div class="memory-status">在脑海中保留刚才的图形…</div></div>';
@@ -201,13 +185,14 @@ function renderSession() {
   const current = session.current;
   const sectionInfo = info.sections[session.sectionIndex] ?? info.sections[3];
   const elapsed = elapsedTime(session);
-  const sectionLeft = Math.max(0, (session.sectionIndex + 1) * session.sectionMs - elapsed);
-  return `<div class="wrap"><header class="session-header">${logo()}<div class="overall-timer">全程剩余 <b class="timer" data-total-left>${clock(session.totalMs - elapsed)}</b></div><div class="session-actions"><button class="ghost" data-action="export-current">导出本次</button><button class="ghost" data-action="${paused ? 'unpause' : 'pause'}">${paused ? '继续计时' : '暂停'}</button><button class="ghost" data-action="finish">提前结束</button></div></header><main id="main"><div class="steps">${CATEGORIES.map((c, index) => `<div class="step ${index === session.sectionIndex ? 'active' : index < session.sectionIndex ? 'done' : ''}"><span><b>${c.number}</b>${c.name}</span><span>${index < session.sectionIndex ? '已结束' : duration(session.sectionMs)}</span></div>`).join('')}</div><div class="practice-layout"><section class="question-card">${paused ? `<div class="pause-surface"><span class="category-icon">${icons.pause}</span><h1>休息一下，进度已保存</h1><p>暂停期间不计入练习用时。<br>准备好了，就从刚才的地方继续。</p><button class="primary" data-action="unpause">继续练习 ${arrow}</button><div style="margin-top:12px"><button class="ghost" data-action="home">返回首页</button></div></div>` : question ? `<div class="question-heading"><div><h1>${currentCategory.name}</h1><div class="question-id">${esc(question.id)}</div></div><span class="level-badge">练习 ${question.level} / ${MAX_LEVEL} 档</span></div><div class="question-body" id="question-body">${questionBody(question, current)}</div><div class="question-actions"><button class="ghost" data-action="skip" ${current.answered ? 'disabled' : ''}>跳过这道题</button><span class="shortcut-hint">${question.type === 'choice' ? '可按 A–D 选择，Enter 提交' : 'Enter 提交答案'}</span><button class="primary" data-action="${current.answered ? 'next' : 'submit'}" id="submit-button">${current.answered ? `下一题 ${arrow}` : '提交答案'}</button></div>` : '<div class="loading-card">正在准备下一题…</div>'}</section><aside class="practice-side"><div class="timer-card"><div class="timer-label">${currentCategory.name} · 本段剩余</div><div class="timer" data-section-left>${clock(sectionLeft)}</div><div class="track"><span data-section-progress style="width:${Math.max(0, sectionLeft / session.sectionMs * 100)}%"></span></div><p class="quiet">时间到后自动进入${CATEGORIES[session.sectionIndex + 1]?.name ?? '练习总结'}</p></div><div class="side-card"><h3>本段作答</h3><div class="side-counts"><div><b class="good num">${sectionInfo.correct}</b><small>答对</small></div><div><b class="bad num">${sectionInfo.incorrect}</b><small>答错</small></div><div><b class="num">${sectionInfo.skipped}</b><small>跳过</small></div></div></div><div class="side-card"><h3>下题目标档位 ${session.levels[currentCategory.id]} / ${MAX_LEVEL}</h3><div class="level-ladder">${Array.from({ length: MAX_LEVEL }, (_, i) => `<span class="${i < session.levels[currentCategory.id] ? 'on' : ''}"></span>`).join('')}</div><p>答对升一档，答错降一档。<br>档位为练习估算，原始难度信息保留在逐题记录中。</p></div></aside></div></main>${footer()}</div>`;
+  const timing = sectionTiming(session);
+  const sectionLeft = Math.max(0, timing.end - elapsed);
+  return `<div class="wrap"><header class="session-header">${logo()}<div class="overall-timer">全程剩余 <b class="timer" data-total-left>${clock(session.totalMs - elapsed)}</b></div><div class="session-actions"><button class="ghost" data-action="export-current">导出本次</button><button class="ghost" data-action="${paused ? 'unpause' : 'pause'}">${paused ? '继续计时' : '暂停'}</button><button class="ghost" data-action="finish">提前结束</button></div></header><main id="main"><div class="steps">${CATEGORIES.map((c, index) => `<div class="step ${index === session.sectionIndex ? 'active' : index < session.sectionIndex ? 'done' : ''}"><span><b>${c.number}</b>${c.name}</span><span>${index < session.sectionIndex ? '已结束' : duration(sectionTiming(session, index).duration)}</span></div>`).join('')}</div><div class="practice-layout"><section class="question-card">${paused ? `<div class="pause-surface"><span class="category-icon">${icons.pause}</span><h1>休息一下，进度已保存</h1><p>暂停期间不计入练习用时。<br>准备好了，就从刚才的地方继续。</p><button class="primary" data-action="unpause">继续练习 ${arrow}</button><div style="margin-top:12px"><button class="ghost" data-action="home">返回首页</button></div></div>` : question ? `<div class="question-heading"><div><h1>${currentCategory.name}</h1><div class="question-id">${esc(question.id)}</div></div><span class="level-badge">练习 ${question.level} / ${MAX_LEVEL} 档</span></div><div class="question-body" id="question-body">${questionBody(question, current)}</div><div class="question-actions"><button class="ghost" data-action="skip" ${current.answered ? 'disabled' : ''}>跳过这道题</button><span class="shortcut-hint">${question.type === 'choice' ? '可按 A–D 选择，Enter 提交' : 'Enter 提交答案'}</span><button class="primary" data-action="${current.answered ? 'next' : 'submit'}" id="submit-button">${current.answered ? `下一题 ${arrow}` : '提交答案'}</button></div>` : '<div class="loading-card">正在准备下一题…</div>'}</section><aside class="practice-side"><div class="timer-card"><div class="timer-label">${currentCategory.name} · 本段剩余</div><div class="timer" data-section-left>${clock(sectionLeft)}</div><div class="track"><span data-section-progress style="width:${Math.max(0, sectionLeft / timing.duration * 100)}%"></span></div><p class="quiet">时间到后自动进入${CATEGORIES[session.sectionIndex + 1]?.name ?? '练习总结'}</p></div><div class="side-card"><h3>本段作答</h3><div class="side-counts"><div><b class="good num">${sectionInfo.correct}</b><small>答对</small></div><div><b class="bad num">${sectionInfo.incorrect}</b><small>答错</small></div><div><b class="num">${sectionInfo.skipped}</b><small>跳过</small></div></div></div><div class="side-card"><h3>下题目标档位 ${session.levels[currentCategory.id]} / ${MAX_LEVEL}</h3><div class="level-ladder">${Array.from({ length: MAX_LEVEL }, (_, i) => `<span class="${i < session.levels[currentCategory.id] ? 'on' : ''}"></span>`).join('')}</div><p>答对升一档，答错降一档。<br>档位为练习估算，原始难度信息保留在逐题记录中。</p></div></aside></div></main>${footer()}</div>`;
 }
 
 function resultMarkup(record, isResult = false) {
   const info = summarize(record);
-  return `<div class="${isResult ? 'result-heading' : 'page-heading'}"><div><div class="eyebrow">${isResult ? '每一题，都有记录' : '逐题回看'}</div><h1>${isResult ? '这次练习，已记录。' : dateLabel(record.startedAt)}</h1><p>${isResult ? `${dateLabel(record.startedAt)}开始 · ` : ''}计划 ${record.totalMs / 60000} 分钟，实际 ${duration(info.elapsedMs)} · ${statusText(record.status)}</p></div>${!isResult ? `<div class="button-row"><button class="secondary" data-action="export-one" data-id="${esc(record.id)}">导出本次</button><button class="ghost" data-action="delete-record" data-id="${esc(record.id)}">删除记录</button></div>` : ''}</div><div class="stats"><div class="stat"><div class="stat-label">答对</div><div class="stat-value" style="color:var(--green)">${info.correct}<small>道</small></div></div><div class="stat"><div class="stat-label">答错</div><div class="stat-value" style="color:var(--red)">${info.incorrect}<small>道</small></div></div><div class="stat"><div class="stat-label">有效作答正确率</div><div class="stat-value">${info.accuracy === null ? '—' : Math.round(info.accuracy * 100)}<small>${info.accuracy === null ? '' : '%'}</small></div></div></div><div class="result-sections">${info.sections.map((section) => `<article class="result-section"><span class="category-icon">${icons[section.id]}</span><h3 style="margin-top:12px">${section.name}</h3><div class="result-numbers">${section.correct}<small> 对 / ${section.incorrect} 错</small></div><p>${duration(section.timeMs)} · 最后目标 ${section.finalLevel} 档</p><div class="quiet">${section.skipped} 跳过 · ${section.unanswered} 未答</div></article>`).join('')}</div>`;
+  return `<div class="${isResult ? 'result-heading' : 'page-heading'}"><div><div class="eyebrow">${isResult ? '每一题，都有记录' : '逐题回看'}</div><h1>${isResult ? '这次练习，已记录。' : dateLabel(record.startedAt)}</h1><p>${isResult ? `${dateLabel(record.startedAt)}开始 · ` : ''}计划 ${record.totalMs / 60000} 分钟，实际 ${duration(info.elapsedMs)} · ${statusText(record.status)}</p><p class="quiet">${record.version === 1 ? '旧版均分计时' : '模拟训练配比 20∶10∶15∶15 · 记忆材料每次展示 1 秒'}</p></div>${!isResult ? `<div class="button-row"><button class="secondary" data-action="export-one" data-id="${esc(record.id)}">导出本次</button><button class="ghost" data-action="delete-record" data-id="${esc(record.id)}">删除记录</button></div>` : ''}</div><div class="stats"><div class="stat"><div class="stat-label">答对</div><div class="stat-value" style="color:var(--green)">${info.correct}<small>道</small></div></div><div class="stat"><div class="stat-label">答错</div><div class="stat-value" style="color:var(--red)">${info.incorrect}<small>道</small></div></div><div class="stat"><div class="stat-label">有效作答正确率</div><div class="stat-value">${info.accuracy === null ? '—' : Math.round(info.accuracy * 100)}<small>${info.accuracy === null ? '' : '%'}</small></div></div></div><div class="result-sections">${info.sections.map((section) => `<article class="result-section"><span class="category-icon">${icons[section.id]}</span><h3 style="margin-top:12px">${section.name}</h3><div class="result-numbers">${section.correct}<small> 对 / ${section.incorrect} 错</small></div><p>实际 ${duration(section.timeMs)} / 计划 ${duration(section.plannedMs)} · 最后目标 ${section.finalLevel} 档</p><div class="quiet">${section.skipped} 跳过 · ${section.unanswered} 未答</div></article>`).join('')}</div>`;
 }
 function results() {
   const record = sessions.find((s) => s.id === selectedSessionId) ?? session;
@@ -329,16 +314,16 @@ function answer(skipped = false) {
 function tick() {
   if (route !== 'practice' || session?.status !== 'running') return;
   const elapsed = elapsedTime(session);
-  if (Math.floor(elapsed / session.sectionMs) !== session.sectionIndex) {
+  if (sectionIndexAt(session) !== session.sectionIndex) {
     session = advanceSession(session);
     if (session.status === 'completed') return endView();
     toast(`现在进入${CATEGORIES[session.sectionIndex].name}，计时已开始。`);
     return nextQuestion();
   }
   document.querySelector('[data-total-left]')?.replaceChildren(clock(session.totalMs - elapsed));
-  document.querySelector('[data-section-left]')?.replaceChildren(clock((session.sectionIndex + 1) * session.sectionMs - elapsed));
+  document.querySelector('[data-section-left]')?.replaceChildren(clock(sectionTiming(session).end - elapsed));
   const progress = document.querySelector('[data-section-progress]');
-  if (progress) progress.style.width = `${Math.max(0, ((session.sectionIndex + 1) * session.sectionMs - elapsed) / session.sectionMs * 100)}%`;
+  if (progress) progress.style.width = `${Math.max(0, (sectionTiming(session).end - elapsed) / sectionTiming(session).duration * 100)}%`;
   const question = getQuestion();
   if (question?.type.startsWith('memory') && !session.current.answered) {
     const stage = memoryStage(question, session.current);
@@ -402,7 +387,24 @@ const actions = {
   finish: () => { session = pauseSession(session); persist(); render(); confirmDialog('现在结束这次练习？', '本次实际用时和已答题目都会保存。还没有完成的题目会单独标为未作答。', '结束并查看结果', () => { session = finishSession(session); endView(); }); },
   choice: (element) => { if (session?.status !== 'running' || session.current.answered) return; session.current.draft = element.dataset.id; render(); },
   element: (element) => { if (session?.status !== 'running' || session.current.answered) return; const selected = session.current.draft ?? []; session.current.draft = selected.includes(element.dataset.id) ? selected.filter((x) => x !== element.dataset.id) : [...selected, element.dataset.id]; render(); },
-  'begin-memory': () => { if (session?.status !== 'running' || session.current.presentationAtElapsed !== null) return; session.current.presentationAtElapsed = elapsedTime(session); session.current.draft = getQuestion().type === 'memory-digits' ? '' : getQuestion().type === 'memory-binding' ? null : []; persist(); render(); },
+  'begin-memory': async (element) => {
+    if (session?.status !== 'running' || session.current.presentationAtElapsed !== null) return;
+    const question = getQuestion();
+    const current = session.current;
+    if (question.type === 'memory-binding') {
+      element.disabled = true;
+      element.textContent = '正在准备图形…';
+      try {
+        const image = new Image();
+        image.src = safeAsset(question.image);
+        await image.decode();
+      } catch { render(); throw new Error('记忆图形加载失败，请重试。'); }
+      if (session.status !== 'running' || session.current !== current || current.presentationAtElapsed !== null) return;
+    }
+    current.presentationAtElapsed = elapsedTime(session);
+    current.draft = question.type === 'memory-digits' ? '' : question.type === 'memory-binding' ? null : [];
+    persist(); render();
+  },
   'memory-cell': (element) => { const q = getQuestion(); if (session?.status !== 'running' || session.current.answered || memoryStage(q, session.current).phase !== 'answer') return; const current = session.current.draft ?? []; if (current.length >= q.sequence.length) return toast('已选完全部位置，可以提交，或撤回一步。'); session.current.draft = [...current, Number(element.dataset.value)]; render(); },
   'memory-undo': () => { session.current.draft = (session.current.draft ?? []).slice(0, -1); render(); },
   'memory-clear': () => { session.current.draft = []; render(); },
@@ -436,7 +438,8 @@ document.addEventListener('input', (event) => {
     const value = Number(event.target.value);
     if (Number.isInteger(value) && value >= 4 && value <= 180) {
       minutes = value;
-      document.querySelectorAll('[data-section-duration]').forEach((node) => node.textContent = duration(minutes * 60000 / 4));
+      const timings = trainingDurations(minutes * 60000);
+      document.querySelectorAll('[data-section-duration]').forEach((node) => node.textContent = duration(timings[Number(node.dataset.sectionDuration)]));
       document.querySelector('#start-label').textContent = `开始 ${minutes} 分钟练习`;
       document.querySelectorAll('.preset').forEach((node) => node.classList.toggle('selected', Number(node.dataset.value) === value));
       savePreferences({ minutes });
