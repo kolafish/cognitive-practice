@@ -6,7 +6,7 @@
   "license": "GPL-3.0-only",
   "scripts": {
     "dev": "python3 -m http.server 4173 --directory public --bind 127.0.0.1",
-    "check": "node --check public/app.js && node --check public/engine.js && node --check public/storage.js && node --check public/practice.js && node --check public/profiles.js",
+    "check": "node --check public/app.js && node --check public/engine.js && node --check public/storage.js && node --check public/practice.js && node --check public/profiles.js && node --check public/scoring.js",
     "test": "node --test tests/*.test.js",
     "build": "node scripts/build.mjs"
   },

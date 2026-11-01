@@ -1,3 +1,4 @@
+import { SCORE_RULE_VERSION, scoreFields, validScoreFields, scoreSummary } from './scoring.js';
 import { taskFamily, targetLevel, presentedLevel, validVisualMemory, validStoredQuestion, familyName, chooseFamily } from './practice.js';
 
 export const CATEGORIES = [
@@ -46,7 +47,7 @@ export function createSession(minutes, now = Date.now(), id = crypto.randomUUID(
   const totalMs = Math.round(minutes * 60000);
   return {
     version: practiceMode ? 3 : 2, id, status: 'running', startedAt: new Date(now).toISOString(), updatedAt: now,
-    ...(practiceMode ? { practiceMode, familyLevels: {} } : {}),
+    ...(practiceMode ? { practiceMode, familyLevels: {}, scoreRuleVersion: SCORE_RULE_VERSION } : {}),
     finishedAt: null, totalMs, sectionDurationsMs: trainingDurations(totalMs),
     memoryDisplayMs: MEMORY_DISPLAY_MS, elapsedMs: 0, anchorAt: now,
     sectionIndex: 0, levels: Object.fromEntries(CATEGORIES.map((c) => [c.id, 1])),
@@ -106,6 +107,7 @@ function unanswered(session, atElapsed, now, reason) {
     timeMs: Math.max(0, atElapsed - current.askedAtElapsed),
     generatedQuestion: current.generatedQuestion ?? null,
     ...(session.version >= 3 ? { questionSnapshot: current.questionSnapshot ?? null } : {}),
+    ...(session.scoreRuleVersion === SCORE_RULE_VERSION ? scoreFields(current.presentedLevel, 'unanswered', current.scorePracticeKind ?? (session.reviewCategories?.includes(current.category) ? 'review' : 'new')) : {}),
   });
 }
 
@@ -214,6 +216,10 @@ export function beginQuestion(session, question, now = Date.now(), random = Math
     choicesOrder: order, draft: null, presentationAtElapsed: null,
     generatedQuestion: question.generated ? question : null };
   if (next.version >= 3) next.current.questionSnapshot = question.generated ? null : copy(question);
+  if (next.scoreRuleVersion === SCORE_RULE_VERSION) {
+    const { scoreMaxPoints, scorePracticeKind } = scoreFields(next.current.presentedLevel, null, next.reviewCategories?.includes(question.category) ? 'review' : 'new');
+    Object.assign(next.current, { scoreMaxPoints, scorePracticeKind });
+  }
   return next;
 }
 
@@ -254,6 +260,7 @@ export function submitAnswer(session, question, answer, now = Date.now(), skippe
     timeMs: Math.max(0, next.elapsedMs - next.current.askedAtElapsed),
     generatedQuestion: question.generated ? question : null,
     ...(next.version >= 3 ? { questionSnapshot: question.generated ? null : copy(question) } : {}),
+    ...(next.scoreRuleVersion === SCORE_RULE_VERSION ? scoreFields(presentedLevel(next, question), skipped ? 'skipped' : correct ? 'correct' : 'incorrect', next.current.scorePracticeKind ?? (next.reviewCategories?.includes(question.category) ? 'review' : 'new')) : {}),
   };
   next.responses.push(response);
   next.current.answered = true;
@@ -270,7 +277,7 @@ export function summarize(session, now = Date.now()) {
     const responses = session.responses.filter((r) => r.category === category.id);
     const correct = responses.filter((r) => r.status === 'correct').length;
     const incorrect = responses.filter((r) => r.status === 'incorrect').length;
-    return { ...category, correct, incorrect,
+    return { ...category, correct, incorrect, ...scoreSummary(session, responses),
       skipped: responses.filter((r) => r.status === 'skipped').length,
       unanswered: responses.filter((r) => r.status === 'unanswered').length,
       attempted: correct + incorrect,
@@ -280,7 +287,7 @@ export function summarize(session, now = Date.now()) {
     };
   });
   const total = (key) => sections.reduce((sum, section) => sum + section[key], 0);
-  return { elapsedMs: elapsed, plannedMs: session.totalMs, sections,
+  return { elapsedMs: elapsed, plannedMs: session.totalMs, sections, ...scoreSummary(session),
     correct: total('correct'), incorrect: total('incorrect'), skipped: total('skipped'),
     unanswered: total('unanswered'), attempted: total('attempted'),
     accuracy: total('attempted') ? total('correct') / total('attempted') : null };
@@ -303,6 +310,7 @@ export function isValidSession(value) {
   const validQuestion = (q) => q && validString(q.questionId) && validString(q.sourceId) && CATEGORIES.some((c) => c.id === q.category) && ['choice', 'construction', 'memory-grid', 'memory-digits', 'memory-binding', 'folding-video', 'folding-choice', 'memory-positions', 'memory-recognition', 'memory-symmetry'].includes(q.type) && validLevel(q.presentedLevel) && validOrder(q.choicesOrder) && validGenerated(q.generatedQuestion) && validSnapshot(q) && (value.version < 3 || validFamily(q.taskFamily));
   if (!value || typeof value !== 'object' || ![1, 2, 3].includes(value.version) || !validString(value.id) || value.id.length > 200) return false;
   if (!['running', 'paused', 'completed', 'stopped'].includes(value.status)) return false;
+  if (value.scoreRuleVersion !== undefined && value.scoreRuleVersion !== SCORE_RULE_VERSION) return false;
   if ((value.userId !== undefined || value.username !== undefined) && (typeof value.userId !== 'string' || !value.userId.startsWith('user:') || value.userId.length > 200 || typeof value.username !== 'string' || value.username.length < 1 || value.username.length > 100)) return false;
   if (value.reviewCategories !== undefined && (!Array.isArray(value.reviewCategories) || value.reviewCategories.length > 4 || !value.reviewCategories.every((id) => CATEGORIES.some((c) => c.id === id)))) return false;
   if (!validDate(value.startedAt) || !Number.isFinite(value.updatedAt) || value.finishedAt !== null && !validDate(value.finishedAt)) return false;
@@ -315,8 +323,8 @@ export function isValidSession(value) {
   if (value.sectionIndex === 4 && value.status !== 'completed') return false;
   if (!value.levels || !CATEGORIES.every((c) => validLevel(value.levels[c.id]))) return false;
   if (!Array.isArray(value.responses) || value.responses.length > 20000) return false;
-  if (!value.responses.every((r) => validQuestion(r) && ['correct', 'incorrect', 'skipped', 'unanswered'].includes(r.status) && validTime(r.timeMs) && validTime(r.elapsedAtAnswer) && validDate(r.answeredAt) && validLevel(r.levelBefore) && validLevel(r.levelAfter) && validAnswer(r.answer) && [true, false, null].includes(r.correct))) return false;
-  if (value.current !== null && (!validQuestion(value.current) || !validTime(value.current.askedAtElapsed) || typeof value.current.answered !== 'boolean' || !validAnswer(value.current.draft) || value.current.presentationAtElapsed !== null && !validTime(value.current.presentationAtElapsed))) return false;
+  if (!value.responses.every((r) => validQuestion(r) && validScoreFields(r) && ['correct', 'incorrect', 'skipped', 'unanswered'].includes(r.status) && validTime(r.timeMs) && validTime(r.elapsedAtAnswer) && validDate(r.answeredAt) && validLevel(r.levelBefore) && validLevel(r.levelAfter) && validAnswer(r.answer) && [true, false, null].includes(r.correct))) return false;
+  if (value.current !== null && (!validQuestion(value.current) || !validScoreFields(value.current, true) || !validTime(value.current.askedAtElapsed) || typeof value.current.answered !== 'boolean' || !validAnswer(value.current.draft) || value.current.presentationAtElapsed !== null && !validTime(value.current.presentationAtElapsed))) return false;
   return true;
 }
 
