@@ -1,3 +1,5 @@
+import { taskFamily, targetLevel, presentedLevel, validVisualMemory, validStoredQuestion, familyName, chooseFamily } from './practice.js';
+
 export const CATEGORIES = [
   { id: 'figure', name: '图形规律', short: '图形', number: '01', description: '观察变化，发现图形之间的规律。' },
   { id: 'memory', name: '记忆能力', short: '记忆', number: '02', description: '记住位置、数字与它们出现的顺序。' },
@@ -38,11 +40,13 @@ export function sectionIndexAt(session, now = Date.now()) {
   return CATEGORIES.length;
 }
 
-export function createSession(minutes, now = Date.now(), id = crypto.randomUUID()) {
+export function createSession(minutes, now = Date.now(), id = crypto.randomUUID(), practiceMode = null) {
   if (!Number.isFinite(minutes) || minutes < 4 || minutes > 180) throw new Error('总时间应为 4–180 分钟。');
+  if (practiceMode !== null && !['north', 'extended'].includes(practiceMode)) throw new Error('练习模式不正确。');
   const totalMs = Math.round(minutes * 60000);
   return {
-    version: 2, id, status: 'running', startedAt: new Date(now).toISOString(), updatedAt: now,
+    version: practiceMode ? 3 : 2, id, status: 'running', startedAt: new Date(now).toISOString(), updatedAt: now,
+    ...(practiceMode ? { practiceMode, familyLevels: {} } : {}),
     finishedAt: null, totalMs, sectionDurationsMs: trainingDurations(totalMs),
     memoryDisplayMs: MEMORY_DISPLAY_MS, elapsedMs: 0, anchorAt: now,
     sectionIndex: 0, levels: Object.fromEntries(CATEGORIES.map((c) => [c.id, 1])),
@@ -67,6 +71,12 @@ export function memoryStage(session, question, current = session.current, now = 
   if (current.presentationAtElapsed === null) return { phase: 'ready', key: 'ready' };
   const elapsed = Math.max(0, elapsedTime(session, now) - current.presentationAtElapsed);
   const display = memoryDisplayDuration(session, question);
+  if (['memory-positions', 'memory-recognition', 'memory-symmetry'].includes(question.type)) {
+    const lead = question.leadMs ?? 500;
+    if (elapsed < lead) return { phase: 'lead', key: 'lead' };
+    if (elapsed < lead + display) return { phase: 'target', key: 'target' };
+    return { phase: 'answer', key: 'answer' };
+  }
   if (question.type === 'memory-binding') {
     const delay = question.delayMs ?? 995;
     if (elapsed < display) return { phase: 'target', key: 'target' };
@@ -88,12 +98,14 @@ function unanswered(session, atElapsed, now, reason) {
   session.responses.push({
     questionId: current.questionId, category: current.category, type: current.type,
     sourceId: current.sourceId, groupId: current.groupId ?? null,
-    presentedLevel: current.presentedLevel, levelBefore: session.levels[current.category],
-    levelAfter: session.levels[current.category], answer: null, correct: null, status: 'unanswered',
+    ...(session.version >= 3 ? { taskFamily: current.taskFamily } : {}),
+    presentedLevel: current.presentedLevel, levelBefore: targetLevel(session, current),
+    levelAfter: targetLevel(session, current), answer: null, correct: null, status: 'unanswered',
     reason, answeredAt: new Date(now).toISOString(), elapsedAtAnswer: atElapsed,
     choicesOrder: current.choicesOrder ?? [],
     timeMs: Math.max(0, atElapsed - current.askedAtElapsed),
     generatedQuestion: current.generatedQuestion ?? null,
+    ...(session.version >= 3 ? { questionSnapshot: current.questionSnapshot ?? null } : {}),
   });
 }
 
@@ -159,11 +171,15 @@ export function chooseQuestion(pool, session, category, exposures = {}, random =
   const used = new Set(session.responses.map((r) => r.questionId));
   const groups = new Set(session.responses.map((r) => r.groupId).filter(Boolean));
   if (session.current) used.add(session.current.questionId);
-  const available = pool.filter((q) => !used.has(q.id) && (!q.groupId || !groups.has(q.groupId)));
+  let available = pool.filter((q) => !used.has(q.id) && (!q.groupId || !groups.has(q.groupId)));
   if (!available.length) return null;
-  const level = session.levels[category];
-  const distance = Math.min(...available.map((q) => Math.abs(q.level - level)));
-  const close = available.filter((q) => Math.abs(q.level - level) === distance);
+  if (session.version >= 3) {
+    const family = chooseFamily([...new Set(available.map(taskFamily))], session, category);
+    available = available.filter((q) => taskFamily(q) === family);
+  }
+  const difference = (q) => Math.abs(presentedLevel(session, q) - targetLevel(session, q));
+  const distance = Math.min(...available.map(difference));
+  const close = available.filter((q) => difference(q) === distance);
   const minimumSeen = Math.min(...close.map((q) => exposures[q.id] ?? 0));
   const fresh = close.filter((q) => (exposures[q.id] ?? 0) === minimumSeen);
   return fresh[Math.floor(random() * fresh.length)];
@@ -190,20 +206,23 @@ export function beginQuestion(session, question, now = Date.now(), random = Math
   if (next.current && !next.current.answered) throw new Error('请先完成当前题目。');
   const choices = question.choices ?? [];
   const order = question.choicesEmbedded ? choices.map((c) => c.id) : shuffle(choices.map((c) => c.id), random);
+  if (next.version >= 3) next.familyLevels[taskFamily(question)] ??= 1;
   next.current = { questionId: question.id, category: question.category, type: question.type,
     sourceId: question.sourceId, groupId: question.groupId ?? null,
-    presentedLevel: question.level, askedAtElapsed: next.elapsedMs, answered: false,
+    ...(next.version >= 3 ? { taskFamily: taskFamily(question) } : {}),
+    presentedLevel: presentedLevel(next, question), askedAtElapsed: next.elapsedMs, answered: false,
     choicesOrder: order, draft: null, presentationAtElapsed: null,
     generatedQuestion: question.generated ? question : null };
+  if (next.version >= 3) next.current.questionSnapshot = question.generated ? null : copy(question);
   return next;
 }
 
 export function gradeAnswer(question, answer) {
-  if (['memory-grid', 'memory-digits', 'construction'].includes(question.type)) {
+  if (['memory-grid', 'memory-digits', 'construction', 'memory-positions'].includes(question.type)) {
     if (!Array.isArray(answer) || answer.length !== question.answer.length) return false;
     const expected = question.answer.map(String);
     const given = answer.map(String);
-    if (question.type === 'construction') {
+    if (['construction', 'memory-positions'].includes(question.type)) {
       if (new Set(given).size !== given.length) return false;
       expected.sort(); given.sort();
     }
@@ -220,22 +239,26 @@ export function submitAnswer(session, question, answer, now = Date.now(), skippe
   if (next.status !== 'running' || next.current?.questionId !== question.id || next.current.answered) {
     return { session: next, rejected: true };
   }
+  if (!skipped && ['memory-positions', 'memory-recognition', 'memory-symmetry'].includes(question.type) && memoryStage(next, question, next.current, now).phase !== 'answer') return { session: next, rejected: true };
   const correct = !skipped && gradeAnswer(question, answer);
-  const before = next.levels[question.category];
+  const before = targetLevel(next, question);
   const after = clamp(before + (correct ? 1 : -1), 1, MAX_LEVEL);
   const response = {
     questionId: question.id, category: question.category, type: question.type,
     sourceId: question.sourceId, groupId: question.groupId ?? null,
-    presentedLevel: question.level, levelBefore: before, levelAfter: after,
+    ...(next.version >= 3 ? { taskFamily: taskFamily(question) } : {}),
+    presentedLevel: presentedLevel(next, question), levelBefore: before, levelAfter: after,
     answer: copy(answer), correct, status: skipped ? 'skipped' : correct ? 'correct' : 'incorrect',
     choicesOrder: [...next.current.choicesOrder],
     answeredAt: new Date(now).toISOString(), elapsedAtAnswer: next.elapsedMs,
     timeMs: Math.max(0, next.elapsedMs - next.current.askedAtElapsed),
     generatedQuestion: question.generated ? question : null,
+    ...(next.version >= 3 ? { questionSnapshot: question.generated ? null : copy(question) } : {}),
   };
   next.responses.push(response);
   next.current.answered = true;
   next.levels[question.category] = after;
+  if (next.version >= 3) next.familyLevels[taskFamily(question)] = after;
   next.updatedAt = now;
   return { session: next, response, rejected: false };
 }
@@ -253,6 +276,7 @@ export function summarize(session, now = Date.now()) {
       attempted: correct + incorrect,
       timeMs: clamp(elapsed - timing.start, 0, timing.duration), plannedMs: timing.duration,
       finalLevel: session.levels[category.id],
+      families: [...new Set([...responses.map((r) => r.taskFamily).filter(Boolean), ...(session.current?.category === category.id && session.current.taskFamily ? [session.current.taskFamily] : [])])].map((family) => ({ id: family, name: familyName(family), level: session.familyLevels?.[family] ?? 1 })),
     };
   });
   const total = (key) => sections.reduce((sum, section) => sum + section[key], 0);
@@ -269,14 +293,21 @@ export function isValidSession(value) {
   const validTime = (n) => Number.isFinite(n) && n >= 0 && n <= value.totalMs;
   const validAnswer = (a) => a === null || typeof a === 'string' && a.length <= 5000 || Number.isFinite(a) || Array.isArray(a) && a.length <= 32 && a.every((x) => typeof x === 'string' && x.length <= 200 || Number.isFinite(x));
   const validOrder = (a) => Array.isArray(a) && a.length <= 20 && a.every(validString);
-  const validGenerated = (q) => q === null || q && validString(q.id) && q.sourceId === 'generated' && q.category === 'memory' && q.type === 'memory-grid' && validLevel(q.level) && q.gridRows === 4 && q.gridColumns === 4 && Array.isArray(q.sequence) && q.sequence.length >= 2 && q.sequence.length <= 9 && q.sequence.every((n) => Number.isInteger(n) && n >= 1 && n <= 16) && Array.isArray(q.answer) && q.answer.length === q.sequence.length && q.answer.every((n, i) => n === q.sequence[i]);
-  const validQuestion = (q) => q && validString(q.questionId) && validString(q.sourceId) && CATEGORIES.some((c) => c.id === q.category) && ['choice', 'construction', 'memory-grid', 'memory-digits', 'memory-binding', 'folding-video'].includes(q.type) && validLevel(q.presentedLevel) && validOrder(q.choicesOrder) && validGenerated(q.generatedQuestion);
-  if (!value || typeof value !== 'object' || ![1, 2].includes(value.version) || !validString(value.id) || value.id.length > 200) return false;
+  const validGenerated = (q) => q === null || validVisualMemory(q) || q && validString(q.id) && q.sourceId === 'generated' && q.category === 'memory' && q.type === 'memory-grid' && validLevel(q.level) && q.gridRows === 4 && q.gridColumns === 4 && Array.isArray(q.sequence) && q.sequence.length >= 2 && q.sequence.length <= 9 && q.sequence.every((n) => Number.isInteger(n) && n >= 1 && n <= 16) && Array.isArray(q.answer) && q.answer.length === q.sequence.length && q.answer.every((n, i) => n === q.sequence[i]);
+  const validFamily = (family) => typeof family === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9:_-]{0,99}$/.test(family) && !['constructor', 'prototype'].includes(family);
+  const validSnapshot = (record) => {
+    if (value.version < 3) return true;
+    const question = record.generatedQuestion ?? record.questionSnapshot;
+    return validStoredQuestion(question) && question.id === record.questionId && question.type === record.type && question.category === record.category && taskFamily(question) === record.taskFamily;
+  };
+  const validQuestion = (q) => q && validString(q.questionId) && validString(q.sourceId) && CATEGORIES.some((c) => c.id === q.category) && ['choice', 'construction', 'memory-grid', 'memory-digits', 'memory-binding', 'folding-video', 'folding-choice', 'memory-positions', 'memory-recognition', 'memory-symmetry'].includes(q.type) && validLevel(q.presentedLevel) && validOrder(q.choicesOrder) && validGenerated(q.generatedQuestion) && validSnapshot(q) && (value.version < 3 || validFamily(q.taskFamily));
+  if (!value || typeof value !== 'object' || ![1, 2, 3].includes(value.version) || !validString(value.id) || value.id.length > 200) return false;
   if (!['running', 'paused', 'completed', 'stopped'].includes(value.status)) return false;
   if (!validDate(value.startedAt) || !Number.isFinite(value.updatedAt) || value.finishedAt !== null && !validDate(value.finishedAt)) return false;
   if (!Number.isFinite(value.totalMs) || value.totalMs < 240000 || value.totalMs > 10800000) return false;
   if (value.version === 1 && value.sectionMs !== value.totalMs / 4) return false;
-  if (value.version === 2 && (!Array.isArray(value.sectionDurationsMs) || value.sectionDurationsMs.length !== 4 || !value.sectionDurationsMs.every((duration, i) => duration === trainingDurations(value.totalMs)[i]) || value.memoryDisplayMs !== MEMORY_DISPLAY_MS)) return false;
+  if (value.version >= 2 && (!Array.isArray(value.sectionDurationsMs) || value.sectionDurationsMs.length !== 4 || !value.sectionDurationsMs.every((duration, i) => duration === trainingDurations(value.totalMs)[i]) || value.memoryDisplayMs !== MEMORY_DISPLAY_MS)) return false;
+  if (value.version === 3 && (!['north', 'extended'].includes(value.practiceMode) || !value.familyLevels || Array.isArray(value.familyLevels) || typeof value.familyLevels !== 'object' || Object.keys(value.familyLevels).length > 100 || !Object.entries(value.familyLevels).every(([family, level]) => validFamily(family) && validLevel(level)))) return false;
   if (!validTime(value.elapsedMs) || value.status === 'running' && !Number.isFinite(value.anchorAt)) return false;
   if (!Number.isInteger(value.sectionIndex) || value.sectionIndex < 0 || value.sectionIndex > 4) return false;
   if (value.sectionIndex === 4 && value.status !== 'completed') return false;

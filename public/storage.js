@@ -79,8 +79,9 @@ export function saveCheckpoint(session) {
 export function readPreferences() {
   try {
     const value = JSON.parse(localStorage.getItem(PREFS_KEY));
-    return value?.minutes >= 4 && value.minutes <= 180 ? value : { minutes: 60 };
-  } catch { return { minutes: 60 }; }
+    return { minutes: Number.isInteger(value?.minutes) && value.minutes >= 4 && value.minutes <= 180 ? value.minutes : 60,
+      mode: ['north', 'extended'].includes(value?.mode) ? value.mode : 'north' };
+  } catch { return { minutes: 60, mode: 'north' }; }
 }
 
 export function savePreferences(value) {
