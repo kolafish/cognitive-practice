@@ -303,6 +303,8 @@ export function isValidSession(value) {
   const validQuestion = (q) => q && validString(q.questionId) && validString(q.sourceId) && CATEGORIES.some((c) => c.id === q.category) && ['choice', 'construction', 'memory-grid', 'memory-digits', 'memory-binding', 'folding-video', 'folding-choice', 'memory-positions', 'memory-recognition', 'memory-symmetry'].includes(q.type) && validLevel(q.presentedLevel) && validOrder(q.choicesOrder) && validGenerated(q.generatedQuestion) && validSnapshot(q) && (value.version < 3 || validFamily(q.taskFamily));
   if (!value || typeof value !== 'object' || ![1, 2, 3].includes(value.version) || !validString(value.id) || value.id.length > 200) return false;
   if (!['running', 'paused', 'completed', 'stopped'].includes(value.status)) return false;
+  if ((value.userId !== undefined || value.username !== undefined) && (typeof value.userId !== 'string' || !value.userId.startsWith('user:') || value.userId.length > 200 || typeof value.username !== 'string' || value.username.length < 1 || value.username.length > 100)) return false;
+  if (value.reviewCategories !== undefined && (!Array.isArray(value.reviewCategories) || value.reviewCategories.length > 4 || !value.reviewCategories.every((id) => CATEGORIES.some((c) => c.id === id)))) return false;
   if (!validDate(value.startedAt) || !Number.isFinite(value.updatedAt) || value.finishedAt !== null && !validDate(value.finishedAt)) return false;
   if (!Number.isFinite(value.totalMs) || value.totalMs < 240000 || value.totalMs > 10800000) return false;
   if (value.version === 1 && value.sectionMs !== value.totalMs / 4) return false;

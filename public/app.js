@@ -1,10 +1,12 @@
 import {
-  CATEGORIES, MAX_LEVEL, createSession, elapsedTime, advanceSession, pauseSession, resumeSession,
+  CATEGORIES, MAX_LEVEL, elapsedTime, advanceSession, pauseSession, resumeSession,
   finishSession, snapshotSession, chooseQuestion, generatedMemory, beginQuestion, submitAnswer,
   summarize, trainingDurations, sectionTiming, sectionIndexAt, memoryDisplayDuration, memoryStage as computeMemoryStage,
 } from './engine.js';
-import { openStore, readCheckpoint, saveCheckpoint, readPreferences, savePreferences } from './storage.js';
-import { MODES, MEMORY_FAMILIES, familyName, taskFamily, targetLevel, presentedLevel, chooseFamily, generateVisualMemory } from './practice.js';
+import { openStore, readCheckpoints, clearCheckpoint, saveCheckpoint, readPreferences, savePreferences, readActiveUser, saveActiveUser } from './storage.js';
+import { MODES, MEMORY_FAMILIES, familyName, taskFamily, targetLevel, presentedLevel } from './practice.js';
+
+import { createUserSession, rememberSession, mergeProfiles, selectUserQuestion, selectUserMemory, memorySignature, userBackup, usernameIdentity } from './profiles.js';
 
 const root = document.querySelector('#app');
 const modal = document.querySelector('#modal');
@@ -40,6 +42,11 @@ let bank = null;
 let practiceBank = null;
 let store = null;
 let sessions = [];
+let allSessions = [];
+let profiles = [];
+let currentProfile = null;
+let viewingLegacy = false;
+let bootReady = false;
 let session = null;
 let route = 'home';
 let selectedSessionId = null;
@@ -69,7 +76,7 @@ function logo() {
   return `<a href="#" data-action="home" class="brand"><span class="brand-mark">${icons.figure}</span><span>思维练习室<small>THINKING ROOM</small></span></a>`;
 }
 function header(active) {
-  return `<header class="header">${logo()}<nav class="nav" aria-label="主要导航"><button data-action="home" class="${active === 'home' ? 'active' : ''}" ${active === 'home' ? 'aria-current="page"' : ''}>开始练习</button><button data-action="history" class="${active === 'history' ? 'active' : ''}" ${active === 'history' ? 'aria-current="page"' : ''}>练习记录</button><button data-action="about" class="${active === 'about' ? 'active' : ''}" ${active === 'about' ? 'aria-current="page"' : ''}>说明</button></nav></header>`;
+  return `<header class="header">${logo()}<nav class="nav" aria-label="主要导航"><button data-action="home" class="${active === 'home' ? 'active' : ''}" ${active === 'home' ? 'aria-current="page"' : ''}>开始练习</button><button data-action="history" class="${active === 'history' ? 'active' : ''}" ${active === 'history' ? 'aria-current="page"' : ''}>练习记录</button><button data-action="about" class="${active === 'about' ? 'active' : ''}" ${active === 'about' ? 'aria-current="page"' : ''}>说明</button></nav><button class="user-button" data-action="users">${currentProfile ? `<span class="user-initial">${esc(Array.from(currentProfile.username)[0])}</span><span class="user-name">${esc(currentProfile.username)}</span><small>切换</small>` : '输入用户名'}</button></header>`;
 }
 function footer() {
   return '<footer class="footer"><div>每一次专注，都留下一点进步。<span class="num"> THINKING ROOM</span></div><div>记录仅保存在当前浏览器 · <a href="attributions.html">题库来源与许可</a> · 非商业练习</div></footer>';
@@ -79,10 +86,21 @@ function sourceName(id) { return bank?.sources.find((s) => s.id === id)?.name ??
 function modeName(record) { return MODES[record?.practiceMode] ?? MODES.legacy; }
 function getQuestion(current = session?.current, parent = session) { return current?.generatedQuestion ?? current?.questionSnapshot ?? (parent?.practiceMode === 'north' ? practiceQuestions.get(current?.questionId) : null) ?? questions.get(current?.questionId); }
 function questionFamilyName(question) { return question?.taskFamilyName ?? familyName(taskFamily(question)); }
-function savePrefs() { savePreferences({ minutes, mode: practiceMode }); }
+function savePrefs() { savePreferences({ minutes, mode: practiceMode }, currentProfile?.id); }
 function activeCandidate() { return sessions.find((s) => ['paused', 'running'].includes(s.status)); }
 
+function legacyRecords() { return allSessions.filter((s)=>!s.userId); }
+function visibleRecords() { return viewingLegacy ? legacyRecords() : sessions; }
+function profileSummary() {
+  if (!currentProfile) return '';
+  const levels = Object.entries(currentProfile.levels[practiceMode]);
+  return `<section class="profile-summary"><div><span class="eyebrow">${esc(currentProfile.username)} 的练习档案</span><p>已出 ${number(currentProfile.seenQuestions.length)} 道固定题 · ${number(currentProfile.memoryPatterns.length)} 种记忆图案或序列</p></div><div class="profile-levels">${levels.length ? levels.map(([family,state])=>`<span>${esc(familyName(family))} <b>${state.level}档</b></span>`).join('') : '<span>首次练习，各小题型从1档开始</span>'}</div><p class="quiet">新练习沿用个人难度，优先出未见题；新题用尽后可主动开启复习。</p></section>`;
+}
+function users() {
+  return shell(`<section class="user-entry"><div class="eyebrow">本地用户档案</div><h1>输入名字，接着练。</h1><p class="lead">无需密码或验证。相同用户名会进入同一份档案，保存已做题目、难度与未完成进度。</p><form id="user-form" class="user-form"><label for="username">用户名</label><div><input id="username" name="username" maxlength="24" autocomplete="username" placeholder="例如：小明" required ${!bootReady || !store ? 'disabled' : ''}><button class="primary" type="submit" ${!bootReady || !store ? 'disabled' : ''}>进入练习 ${arrow}</button></div><p class="quiet">中文、字母或数字，最多24个字符；英文字母不区分大小写。</p></form>${storageError ? `<div class="error-banner">${esc(storageError)}</div>` : ''}${profiles.length ? `<div class="saved-users"><h2>这台设备上的用户</h2><div>${profiles.map((profile)=>`<button class="saved-user" data-action="enter-user" data-name="${esc(profile.username)}"><span class="user-initial">${esc(Array.from(profile.username)[0])}</span><span>${esc(profile.username)}<small>${number(profile.seenQuestions.length)} 道固定题 · 继续个人进度</small></span>${arrow}</button>`).join('')}</div></div>` : ''}<div class="user-entry-notes"><p>档案仅保存在当前浏览器。同名即视为同一用户；不同孩子请使用不同名字。换设备时可导出、导入备份。</p><div class="button-row"><button class="secondary" data-action="import">导入备份</button>${legacyRecords().length ? `<button class="ghost" data-action="legacy">查看未归属记录（${legacyRecords().length}条）</button>` : ''}${currentProfile ? '<button class="ghost" data-action="home">返回当前用户</button>' : ''}</div></div></section>`, 'users');
+}
 function home() {
+  if (!currentProfile) return users();
   const pending = activeCandidate();
   const timings = trainingDurations(minutes * 60000);
   const selectedBank = practiceMode === 'north' ? practiceBank : bank;
@@ -94,10 +112,11 @@ function home() {
   } : Object.fromEntries(CATEGORIES.map((c) => [c.id, c.description]));
   const counts = (id) => !selectedBank ? '准备中' : practiceMode === 'north' && id === 'memory' ? '按档位随机生成' : `${number(selectedBank.categories[id].length)} 道题`;
   return shell(`
+    ${profileSummary()}
     ${pending ? `<section class="resume-banner"><div><strong>还有一段练习，可以接着完成</strong><p>${dateLabel(pending.startedAt)}开始 · ${esc(modeName(pending))} · 已练习 ${duration(pending.elapsedMs)}</p></div><div class="button-row"><button class="ghost" data-action="stop-pending" data-id="${esc(pending.id)}">结束这次</button><button class="primary" data-action="resume" data-id="${esc(pending.id)}">继续练习 ${arrow}</button></div></section>` : ''}
     ${loadError ? `<div class="error-banner">${esc(loadError)} <button class="ghost" data-action="reload">重新加载</button></div>` : ''}
     ${storageError ? `<div class="error-banner">${esc(storageError)}</div>` : ''}
-    <section class="hero"><div><div class="eyebrow">四类能力 · 自适应练习</div><h1>从一小步开始，<br>让思维慢慢展开。</h1><p class="lead">选择一段专注的时间。图形、记忆、空间与文字依次练习，每种小题型独立调整难度。</p><div class="hero-notes"><span>${icons.clock}20∶10∶15∶15 训练配比</span><span>${icons.save}逐题记录，随时回看</span></div></div><div class="hero-art" aria-hidden="true">${CATEGORIES.map((c) => `<div class="art-card">${icons[c.id]}<small>${c.name}</small></div>`).join('')}<div class="art-tag"><b>1 → 8</b>从简单题开始</div></div></section>
+    <section class="hero"><div><div class="eyebrow">四类能力 · 自适应练习</div><h1>从一小步开始，<br>让思维慢慢展开。</h1><p class="lead">选择一段专注的时间。图形、记忆、空间与文字依次练习，每种小题型独立调整难度。</p><div class="hero-notes"><span>${icons.clock}20∶10∶15∶15 训练配比</span><span>${icons.save}逐题记录，随时回看</span></div></div><div class="hero-art" aria-hidden="true">${CATEGORIES.map((c) => `<div class="art-card">${icons[c.id]}<small>${c.name}</small></div>`).join('')}<div class="art-tag"><b>1 → 8</b>${currentProfile ? '沿用个人难度' : '从简单题开始'}</div></div></section>
     <section class="mode-section"><div class="mode-picker" role="group" aria-label="练习题库">${['north', 'extended'].map((mode) => `<button class="mode-option ${practiceMode === mode ? 'selected' : ''}" data-action="mode" data-value="${mode}" aria-pressed="${practiceMode === mode}"><strong>${MODES[mode]}</strong><span>${mode === 'north' ? '贴近四类机考能力' : '完整题库，拓宽思路'}</span></button>`).join('')}</div><p class="quiet mode-note">${practiceMode === 'north' ? '按公开反馈筛选的专项练习，含原创视觉记忆；不是真题或官方考试复刻。' : '保留原有完整题库，包括矩阵构图、数字序列、旋转、立方体与动画孔数等。'}</p></section>
     <section><div class="section-heading"><h2>四段专注，一次完整练习</h2><span class="quiet">${selectedBank ? `${number(selectedBank.stats.total)} 道${practiceMode === 'north' ? '精选题 + 随机视觉记忆' : '题已就绪'}` : '正在加载题库…'}</span></div><div class="category-grid">${CATEGORIES.map((c, index) => `<article class="category-card"><div class="category-top"><span class="category-icon">${icons[c.id]}</span><span class="category-number">${c.number}</span></div><h3>${c.name}</h3><p>${descriptions[c.id]}</p><div class="category-foot"><span>${counts(c.id)}</span><b data-section-duration="${index}">${duration(timings[index])}</b></div></article>`).join('')}</div></section>
     <section class="setup"><div><h2>这次，留多少时间给自己？</h2><div class="preset-row">${[40, 60, 90].map((value) => `<button data-action="duration" data-value="${value}" class="preset ${minutes === value ? 'selected' : ''}">${value} 分钟</button>`).join('')}<label class="custom-duration">自定义 <input id="minutes" type="number" min="4" max="180" step="1" value="${minutes}" aria-label="总练习分钟数"> 分钟</label></div><p class="quiet">按 20∶10∶15∶15 分配时间（模拟训练方案）。${practiceMode === 'north' ? '记忆题整幅图展示1秒，再在本段剩余时间内作答。' : '记忆序列逐项展示1秒；位置绑定题目标图展示1秒。'}</p></div><div class="setup-action"><button class="primary start-button" data-action="start" ${!bank || !practiceBank || !store || pending ? 'disabled' : ''}><span id="start-label">${selectedBank ? `开始 ${minutes} 分钟练习` : '正在准备题库…'}</span>${arrow}</button><p class="quiet">${pending ? '先继续或结束未完成的练习' : '可以暂停 · 关闭页面后可恢复进度'}</p></div></section>
@@ -105,19 +124,22 @@ function home() {
 }
 
 function history() {
-  const filtered = sessions.filter((s) => !dateFilter || dateKey(s.startedAt) === dateFilter);
-  const stats = sessions.map((s) => summarize(s));
+  if (!currentProfile && !viewingLegacy) return users();
+  const records = visibleRecords();
+  const filtered = records.filter((s) => !dateFilter || dateKey(s.startedAt) === dateFilter);
+  const stats = records.map((s) => summarize(s));
   const totalTime = stats.reduce((sum, s) => sum + s.elapsedMs, 0);
   const totalCorrect = stats.reduce((sum, s) => sum + s.correct, 0);
-  return shell(`<div class="page-heading"><div><div class="eyebrow">记录自己的节奏</div><h1>练习记录</h1><p>哪天练了多久，每道题的答案，都在这里。</p></div><div class="button-row"><button class="secondary" data-action="import">导入备份</button><button class="primary" data-action="export" ${!sessions.length ? 'disabled' : ''}>导出全部记录</button></div></div>
-    <div class="stats"><div class="stat"><div class="stat-label">累计练习</div><div class="stat-value">${sessions.length}<small>次</small></div></div><div class="stat"><div class="stat-label">累计专注</div><div class="stat-value">${Math.floor(totalTime / 60000)}<small>分钟</small></div></div><div class="stat"><div class="stat-label">累计答对</div><div class="stat-value">${totalCorrect}<small>道</small></div></div></div>
+  return shell(`<div class="page-heading"><div><div class="eyebrow">记录自己的节奏</div><h1>${viewingLegacy ? '未归属记录' : esc(currentProfile.username) + '的练习记录'}</h1><p>哪天练了多久，每道题的答案，都在这里。</p></div><div class="button-row"><button class="secondary" data-action="import">导入备份</button><button class="primary" data-action="export" ${!records.length && (viewingLegacy || !currentProfile) ? 'disabled' : ''}>导出${viewingLegacy ? '这些记录' : '当前用户'}</button></div></div>
+    ${viewingLegacy ? `<section class="resume-banner"><div><strong>这些旧记录尚未归入用户名</strong><p>旧记录的答案、难度和未完成进度都已保留。</p></div>${currentProfile ? `<button class="primary" data-action="claim-legacy">归入 ${esc(currentProfile.username)}</button>` : '<button class="primary" data-action="users">先选择用户名</button>'}</section>` : legacyRecords().length ? `<section class="resume-banner"><div><strong>另有 ${legacyRecords().length} 条未归属旧记录</strong><p>可先查看，再决定是否归入当前用户。</p></div><button class="secondary" data-action="legacy">查看旧记录</button></section>` : ''}
+    <div class="stats"><div class="stat"><div class="stat-label">累计练习</div><div class="stat-value">${records.length}<small>次</small></div></div><div class="stat"><div class="stat-label">累计专注</div><div class="stat-value">${Math.floor(totalTime / 60000)}<small>分钟</small></div></div><div class="stat"><div class="stat-label">累计答对</div><div class="stat-value">${totalCorrect}<small>道</small></div></div></div>
     <div class="filter-row"><span class="quiet">${dateFilter ? `${dateFilter} 的记录` : '全部练习'}</span><label class="date-filter">按日期查看 <input id="date-filter" type="date" value="${esc(dateFilter)}" aria-label="筛选练习日期">${dateFilter ? '<button data-action="clear-date">显示全部</button>' : ''}</label></div>
     <div class="table-card">${filtered.length ? `<table class="records-table"><thead><tr><th>练习时间（北京时间）</th><th>实际用时</th><th>作答情况</th><th>状态</th><th></th></tr></thead><tbody>${filtered.map((s) => { const info = summarize(s); return `<tr><td><span class="num">${dateLabel(s.startedAt)}</span><div class="quiet">${esc(modeName(s))} · 计划 ${s.totalMs / 60000} 分钟</div></td><td class="num">${duration(info.elapsedMs)}</td><td><span style="color:var(--green)">${info.correct} 对</span> / <span style="color:var(--red)">${info.incorrect} 错</span><div class="quiet">${info.skipped} 跳过 · ${info.unanswered} 未答</div></td><td><span class="pill ${s.status}">${statusText(s.status)}</span></td><td><button class="ghost" data-action="detail" data-id="${esc(s.id)}">查看 →</button></td></tr>`; }).join('')}</tbody></table>` : `<div class="empty">${icons.verbal}<h2>${dateFilter ? '这一天还没有练习记录' : '第一段专注，从这里开始'}</h2><p>${dateFilter ? '可以选择其他日期，或显示全部记录。' : '完成练习后，会自动保存用时与逐题结果。'}</p>${!dateFilter ? '<button class="primary" data-action="home">开始一次练习</button>' : ''}</div>`}</div><p class="history-note">记录保存在当前浏览器，清理站点数据会清除记录。导出 JSON 备份后，可以在另一台设备导入；相同记录会按更新时间合并。</p>
   `, 'history');
 }
 
 function about() {
-  return shell(`<div class="page-heading"><div><div class="eyebrow">轻松上手</div><h1>怎样练，怎样记录</h1><p>按自己的节奏，完成四类思维练习。</p></div></div><div class="help-grid"><section class="help-card"><h2>按模拟训练配比分配时间</h2><p>默认60分钟：图形20分钟、记忆10分钟、空间15分钟、文字15分钟。其他总时长按相同比例缩放；90分钟分别为30、15、22分30秒、22分30秒。每段到时自动切换，暂停停止计时。这是模拟训练配比，不代表官方考试安排；旧版练习沿用创建时的时间方案。</p></section><section class="help-card"><h2>答对升级，答错降级</h2><p>新练习中，每种小题型各自从1档开始，答对升一档，答错或跳过降一档，范围为1–8档。例如位置记忆做对，不会提高对称判断的起始档位。如果该档没有可用题，会选择最近的档位。同一段交替练习不同小题型，优先避免重复题及重复情境；旧记录继续沿用原有规则。</p></section><section class="help-card"><h2>练习档位怎样确定</h2><p>1–8档是练习分档，综合原始难度、题目结构或估算结果，不是年龄常模或智商分数。每道题均保留原始难度依据。北中主练按相关性筛题，保留图形选择、折纸孔位、条件排序与常用词关系；原有完整题库保存在拓展练习。部分档位题量不足时会用最近档位。</p></section><section class="help-card"><h2>记录由你自己保管</h2><p>每次记录开始日期、实际用时、四类用时，以及逐题答案、正确与否、作答时长和档位变化。作答后自动保存；导出备份可以迁移设备，导入不会清除已有记录。站点不向服务器上传练习记录。</p></section><section class="help-card"><h2>记忆题怎么操作</h2><p>北中主练包含位置记忆、图案辨认、对称判断，整幅黑白方格图同时展示1秒，图形消失后作答。位置题选全所有黑格，顺序不限；辨认题四选一；对称题按题干指定的中线判断。题目由本程序原创生成，不是考试真题。拓展练习保留逐项序列与位置绑定题。暂停可以停住进度。</p></section><section class="help-card"><h2>关闭页面也能继续</h2><p>练习中每秒保留进度检查点，回到网站后选择“继续练习”即可。记录里的实际用时不包含暂停或关闭网页的时间。浏览器无可用存储时会提示，避免开始一场无法保存的练习。</p></section></div><div class="section-heading"><h2>题库来源</h2><a class="quiet" href="attributions.html">完整许可与署名 →</a></div><div class="source-grid">${(bank?.sources ?? []).map((s) => `<div class="source-card"><a href="${safeLink(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.name)}</a><p>${esc(s.license)}</p></div>`).join('')}</div>`, 'about');
+  return shell(`<div class="page-heading"><div><div class="eyebrow">轻松上手</div><h1>怎样练，怎样记录</h1><p>按自己的节奏，完成四类思维练习。</p></div></div><div class="help-grid"><section class="help-card"><h2>用用户名保存个人进度</h2><p>无需验证，同一浏览器内输入相同用户名即可进入同一份档案，英文字母不区分大小写。不同用户的记录、未完成练习与难度独立保存。新练习沿用上次各小题型的目标档位，主练和拓展分别保存。换设备需要导出、导入备份。</p></section><section class="help-card"><h2>已见题怎样去重</h2><p>同一用户优先排除曾经出过的固定题和同情境变式，随机记忆也按图案或序列避重；当前档位没有新题时选择最近的可用档位。本类新题用尽会提示，可主动开启复习。删除一次练习记录仍保留去重清单与档位。</p></section><section class="help-card"><h2>按模拟训练配比分配时间</h2><p>默认60分钟：图形20分钟、记忆10分钟、空间15分钟、文字15分钟。其他总时长按相同比例缩放；90分钟分别为30、15、22分30秒、22分30秒。每段到时自动切换，暂停停止计时。这是模拟训练配比，不代表官方考试安排；旧版练习沿用创建时的时间方案。</p></section><section class="help-card"><h2>答对升级，答错降级</h2><p>新用户的每种小题型从1档开始，后续练习沿用个人档位；答对升一档，答错或跳过降一档，范围为1–8档。例如位置记忆做对，不会提高对称判断的起始档位。如果该档没有可用题，会选择最近的档位。同一段交替练习不同小题型，优先避免重复题及重复情境；旧记录继续沿用原有规则。</p></section><section class="help-card"><h2>练习档位怎样确定</h2><p>1–8档是练习分档，综合原始难度、题目结构或估算结果，不是年龄常模或智商分数。每道题均保留原始难度依据。北中主练按相关性筛题，保留图形选择、折纸孔位、条件排序与常用词关系；原有完整题库保存在拓展练习。部分档位题量不足时会用最近档位。</p></section><section class="help-card"><h2>记录由你自己保管</h2><p>每次记录开始日期、实际用时、四类用时，以及逐题答案、正确与否、作答时长和档位变化。作答后自动保存；导出备份可以迁移设备，导入不会清除已有记录。站点不向服务器上传练习记录。</p></section><section class="help-card"><h2>记忆题怎么操作</h2><p>北中主练包含位置记忆、图案辨认、对称判断，整幅黑白方格图同时展示1秒，图形消失后作答。位置题选全所有黑格，顺序不限；辨认题四选一；对称题按题干指定的中线判断。题目由本程序原创生成，不是考试真题。拓展练习保留逐项序列与位置绑定题。暂停可以停住进度。</p></section><section class="help-card"><h2>关闭页面也能继续</h2><p>练习中每秒保留进度检查点，回到网站后选择“继续练习”即可。记录里的实际用时不包含暂停或关闭网页的时间。浏览器无可用存储时会提示，避免开始一场无法保存的练习。</p></section></div><div class="section-heading"><h2>题库来源</h2><a class="quiet" href="attributions.html">完整许可与署名 →</a></div><div class="source-grid">${(bank?.sources ?? []).map((s) => `<div class="source-card"><a href="${safeLink(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.name)}</a><p>${esc(s.license)}</p></div>`).join('')}</div>`, 'about');
 }
 
 function memoryStage(question, current, now = Date.now()) {
@@ -240,15 +262,15 @@ function renderSession() {
   const sectionLeft = Math.max(0, timing.end - elapsed);
   const target = question ? targetLevel(session, question) : 1;
   const subtype = question ? questionFamilyName(question) : '';
-  return `<div class="wrap"><header class="session-header">${logo()}<div class="overall-timer">全程剩余 <b class="timer" data-total-left>${clock(session.totalMs - elapsed)}</b></div><div class="session-actions"><button class="ghost" data-action="export-current">导出本次</button><button class="ghost" data-action="${paused ? 'unpause' : 'pause'}">${paused ? '继续计时' : '暂停'}</button><button class="ghost" data-action="finish">提前结束</button></div></header><main id="main"><div class="steps">${CATEGORIES.map((c, index) => `<div class="step ${index === session.sectionIndex ? 'active' : index < session.sectionIndex ? 'done' : ''}"><span><b>${c.number}</b>${c.name}</span><span>${index < session.sectionIndex ? '已结束' : duration(sectionTiming(session, index).duration)}</span></div>`).join('')}</div><div class="practice-layout"><section class="question-card">${paused ? `<div class="pause-surface"><span class="category-icon">${icons.pause}</span><h1>休息一下，进度已保存</h1><p>暂停期间不计入练习用时。<br>准备好了，就从刚才的地方继续。</p><button class="primary" data-action="unpause">继续练习 ${arrow}</button><div style="margin-top:12px"><button class="ghost" data-action="home">返回首页</button></div></div>` : question ? `<div class="question-heading"><div><h1>${currentCategory.name}</h1><div class="question-id">${esc(modeName(session))} · ${esc(subtype)}</div></div><span class="level-badge">练习 ${presentedLevel(session, question)} / ${MAX_LEVEL} 档</span></div><div class="question-body" id="question-body">${questionBody(question, current)}</div><div class="question-actions"><button class="ghost" data-action="skip" ${current.answered ? 'disabled' : ''}>跳过这道题</button><span class="shortcut-hint">${question.choices ? `可按 A–${String.fromCharCode(64 + question.choices.length)} 选择，Enter 提交` : 'Enter 提交答案'}</span><button class="primary" data-action="${current.answered ? 'next' : 'submit'}" id="submit-button">${current.answered ? `下一题 ${arrow}` : '提交答案'}</button></div>` : '<div class="loading-card">正在准备下一题…</div>'}</section><aside class="practice-side"><div class="timer-card"><div class="timer-label">${currentCategory.name} · 本段剩余</div><div class="timer" data-section-left>${clock(sectionLeft)}</div><div class="track"><span data-section-progress style="width:${Math.max(0, sectionLeft / timing.duration * 100)}%"></span></div><p class="quiet">时间到后自动进入${CATEGORIES[session.sectionIndex + 1]?.name ?? '练习总结'}</p></div><div class="side-card"><h3>本段作答</h3><div class="side-counts"><div><b class="good num">${sectionInfo.correct}</b><small>答对</small></div><div><b class="bad num">${sectionInfo.incorrect}</b><small>答错</small></div><div><b class="num">${sectionInfo.skipped}</b><small>跳过</small></div></div></div><div class="side-card"><h3>同类题目标 ${target} / ${MAX_LEVEL}</h3><div class="level-ladder">${Array.from({ length: MAX_LEVEL }, (_, i) => `<span class="${i < target ? 'on' : ''}"></span>`).join('')}</div><p>${session.version >= 3 ? esc(subtype) + '独立升降档。' : '答对升一档，答错降一档。'}<br>档位为练习估算，原始难度信息保留在逐题记录中。</p></div></aside></div></main>${footer()}</div>`;
+  return `<div class="wrap"><header class="session-header">${logo()}<div class="overall-timer">全程剩余 <b class="timer" data-total-left>${clock(session.totalMs - elapsed)}</b></div><div class="session-actions"><button class="ghost" data-action="users">${esc(currentProfile?.username ?? '')} · 切换用户</button><button class="ghost" data-action="export-current">导出本次</button><button class="ghost" data-action="${paused ? 'unpause' : 'pause'}">${paused ? '继续计时' : '暂停'}</button><button class="ghost" data-action="finish">提前结束</button></div></header><main id="main"><div class="steps">${CATEGORIES.map((c, index) => `<div class="step ${index === session.sectionIndex ? 'active' : index < session.sectionIndex ? 'done' : ''}"><span><b>${c.number}</b>${c.name}</span><span>${index < session.sectionIndex ? '已结束' : duration(sectionTiming(session, index).duration)}</span></div>`).join('')}</div><div class="practice-layout"><section class="question-card">${paused ? `<div class="pause-surface"><span class="category-icon">${icons.pause}</span><h1>休息一下，进度已保存</h1><p>暂停期间不计入练习用时。<br>准备好了，就从刚才的地方继续。</p><button class="primary" data-action="unpause">继续练习 ${arrow}</button><div style="margin-top:12px"><button class="ghost" data-action="home">返回首页</button></div></div>` : question ? `<div class="question-heading"><div><h1>${currentCategory.name}</h1><div class="question-id">${esc(modeName(session))} · ${esc(subtype)}</div></div><span class="level-badge">练习 ${presentedLevel(session, question)} / ${MAX_LEVEL} 档</span></div><div class="question-body" id="question-body">${questionBody(question, current)}</div><div class="question-actions"><button class="ghost" data-action="skip" ${current.answered ? 'disabled' : ''}>跳过这道题</button><span class="shortcut-hint">${question.choices ? `可按 A–${String.fromCharCode(64 + question.choices.length)} 选择，Enter 提交` : 'Enter 提交答案'}</span><button class="primary" data-action="${current.answered ? 'next' : 'submit'}" id="submit-button">${current.answered ? `下一题 ${arrow}` : '提交答案'}</button></div>` : `<div class="exhausted-card"><span class="category-icon">${icons[currentCategory.id]}</span><h1>这类新题，已练完了。</h1><p>已见题不会自动重复。可以开启本段复习，或等待倒计时进入下一段。</p><button class="primary" data-action="review-section">复习本类题目 ${arrow}</button></div>`}</section><aside class="practice-side"><div class="timer-card"><div class="timer-label">${currentCategory.name} · 本段剩余</div><div class="timer" data-section-left>${clock(sectionLeft)}</div><div class="track"><span data-section-progress style="width:${Math.max(0, sectionLeft / timing.duration * 100)}%"></span></div><p class="quiet">时间到后自动进入${CATEGORIES[session.sectionIndex + 1]?.name ?? '练习总结'}</p></div><div class="side-card"><h3>本段作答</h3><div class="side-counts"><div><b class="good num">${sectionInfo.correct}</b><small>答对</small></div><div><b class="bad num">${sectionInfo.incorrect}</b><small>答错</small></div><div><b class="num">${sectionInfo.skipped}</b><small>跳过</small></div></div></div><div class="side-card"><h3>${question ? `同类题目标 ${target} / ${MAX_LEVEL}` : '个人难度已保存'}</h3>${question ? `<div class="level-ladder">${Array.from({ length: MAX_LEVEL }, (_, i) => `<span class="${i < target ? 'on' : ''}"></span>`).join('')}</div>` : ''}<p>${question ? session.version >= 3 ? esc(subtype) + '独立升降档。' : '答对升一档，答错降一档。' : '各小题型的档位分别保存，复习时继续沿用。'}<br>档位为练习估算，原始难度信息保留在逐题记录中。</p></div></aside></div></main>${footer()}</div>`;
 }
 
 function resultMarkup(record, isResult = false) {
   const info = summarize(record);
-  return `<div class="${isResult ? 'result-heading' : 'page-heading'}"><div><div class="eyebrow">${isResult ? '每一题，都有记录' : '逐题回看'}</div><h1>${isResult ? '这次练习，已记录。' : dateLabel(record.startedAt)}</h1><p>${isResult ? `${dateLabel(record.startedAt)}开始 · ` : ''}计划 ${record.totalMs / 60000} 分钟，实际 ${duration(info.elapsedMs)} · ${statusText(record.status)}</p><p class="quiet">${esc(modeName(record))} · ${record.version === 1 ? '旧版均分计时' : '模拟训练配比 20∶10∶15∶15 · 记忆材料每次展示 1 秒'}</p></div>${!isResult ? `<div class="button-row"><button class="secondary" data-action="export-one" data-id="${esc(record.id)}">导出本次</button><button class="ghost" data-action="delete-record" data-id="${esc(record.id)}">删除记录</button></div>` : ''}</div><div class="stats"><div class="stat"><div class="stat-label">答对</div><div class="stat-value" style="color:var(--green)">${info.correct}<small>道</small></div></div><div class="stat"><div class="stat-label">答错</div><div class="stat-value" style="color:var(--red)">${info.incorrect}<small>道</small></div></div><div class="stat"><div class="stat-label">有效作答正确率</div><div class="stat-value">${info.accuracy === null ? '—' : Math.round(info.accuracy * 100)}<small>${info.accuracy === null ? '' : '%'}</small></div></div></div><div class="result-sections">${info.sections.map((section) => `<article class="result-section"><span class="category-icon">${icons[section.id]}</span><h3 style="margin-top:12px">${section.name}</h3><div class="result-numbers">${section.correct}<small> 对 / ${section.incorrect} 错</small></div><p>实际 ${duration(section.timeMs)} / 计划 ${duration(section.plannedMs)}${record.version < 3 ? ` · 最后目标 ${section.finalLevel} 档` : ''}</p>${record.version >= 3 ? `<div class="family-levels">${section.families.map((family) => `<span>${esc(family.name)} ${family.level}档</span>`).join('')}</div>` : ''}<div class="quiet">${section.skipped} 跳过 · ${section.unanswered} 未答</div></article>`).join('')}</div>`;
+  return `<div class="${isResult ? 'result-heading' : 'page-heading'}"><div><div class="eyebrow">${isResult ? '每一题，都有记录' : '逐题回看'}</div><h1>${isResult ? '这次练习，已记录。' : dateLabel(record.startedAt)}</h1><p>${isResult ? `${dateLabel(record.startedAt)}开始 · ` : ''}计划 ${record.totalMs / 60000} 分钟，实际 ${duration(info.elapsedMs)} · ${statusText(record.status)}</p><p class="quiet">${esc(record.username ?? '未归属记录')} · ${esc(modeName(record))} · ${record.version === 1 ? '旧版均分计时' : '模拟训练配比 20∶10∶15∶15 · 记忆材料每次展示 1 秒'}</p></div>${!isResult ? `<div class="button-row"><button class="secondary" data-action="export-one" data-id="${esc(record.id)}">导出本次</button><button class="ghost" data-action="delete-record" data-id="${esc(record.id)}">删除记录</button></div>` : ''}</div><div class="stats"><div class="stat"><div class="stat-label">答对</div><div class="stat-value" style="color:var(--green)">${info.correct}<small>道</small></div></div><div class="stat"><div class="stat-label">答错</div><div class="stat-value" style="color:var(--red)">${info.incorrect}<small>道</small></div></div><div class="stat"><div class="stat-label">有效作答正确率</div><div class="stat-value">${info.accuracy === null ? '—' : Math.round(info.accuracy * 100)}<small>${info.accuracy === null ? '' : '%'}</small></div></div></div><div class="result-sections">${info.sections.map((section) => `<article class="result-section"><span class="category-icon">${icons[section.id]}</span><h3 style="margin-top:12px">${section.name}</h3><div class="result-numbers">${section.correct}<small> 对 / ${section.incorrect} 错</small></div><p>实际 ${duration(section.timeMs)} / 计划 ${duration(section.plannedMs)}${record.version < 3 ? ` · 最后目标 ${section.finalLevel} 档` : ''}</p>${record.version >= 3 ? `<div class="family-levels">${section.families.map((family) => `<span>${esc(family.name)} ${family.level}档</span>`).join('')}</div>` : ''}<div class="quiet">${section.skipped} 跳过 · ${section.unanswered} 未答</div></article>`).join('')}</div>`;
 }
 function results() {
-  const record = sessions.find((s) => s.id === selectedSessionId) ?? session;
+  const record = visibleRecords().find((s) => s.id === selectedSessionId) ?? session;
   if (!record) return home();
   return shell(`${resultMarkup(record, true)}<div class="button-row" style="margin-top:26px"><button class="primary" data-action="detail" data-id="${esc(record.id)}">查看逐题记录 ${arrow}</button><button class="secondary" data-action="home">回到首页</button><button class="ghost" data-action="export-one" data-id="${esc(record.id)}">导出本次</button></div><p class="history-note">跳过与未作答单独统计，不计入有效作答正确率。每种小题型分别调整难度，正确率不直接代表能力高低。</p>`, 'history');
 }
@@ -267,18 +289,18 @@ function reviewRecord(record, index, parent) {
   return `<details class="record-detail"><summary class="record-summary"><span class="summary-main"><span class="status-dot ${record.status}"></span><b>${String(index + 1).padStart(2, '0')}</b><span>${category(record.category).short} · ${statusText(record.status)}</span><span class="quiet">${record.presentedLevel}档 · ${duration(record.timeMs)}</span><span class="question-code">${esc(record.questionId)}</span></span><span class="quiet">展开 ↓</span></summary><div class="record-review"><p class="question-prompt">${esc(q.prompt)}</p>${q.promptNeedsOriginal ? `<div class="original-prompt">${esc(q.originalPromptEn)}</div>` : ''}${media}<div class="answer-comparison"><div><small>你的答案</small>${esc(formatAnswer(q, record.answer, record.choicesOrder))}</div><div><small>正确答案</small>${question ? esc(formatAnswer(q, q.answer, record.choicesOrder)) : '请参考原题库'}</div></div>${explanation ? `<p class="review-explanation">${esc(explanation)}</p>` : ''}<p class="quiet" style="margin-top:15px">来源：${esc(sourceName(record.sourceId))}<br>原始难度：${esc(q.originalDifficulty?.label_zh ?? '未提供')}<br>${esc(q.familyLevelBasis ?? q.levelBasis ?? '练习估算')}<br>目标档位 ${record.levelBefore} → ${record.levelAfter}</p></div></details>`;
 }
 function detail() {
-  const record = sessions.find((s) => s.id === selectedSessionId);
+  const record = visibleRecords().find((s) => s.id === selectedSessionId);
   if (!record) return history();
   const responses = record.responses.map((response, index) => ({ response, index })).filter(({ response }) => {
     if (recordFilter === 'all') return true;
     if (recordFilter === 'other') return ['skipped', 'unanswered'].includes(response.status);
     return response.status === recordFilter;
   });
-  return shell(`<button class="ghost" data-action="history" style="margin-top:22px;padding-left:0">← 全部记录</button>${resultMarkup(record)}<div class="filter-row">${[['all', '全部题目'], ['incorrect', '只看答错'], ['correct', '只看答对'], ['other', '跳过与未答']].map(([value, label]) => `<button class="${recordFilter === value ? 'active' : ''}" data-action="record-filter" data-value="${value}">${label}</button>`).join('')}<span class="quiet">${responses.length} 条</span></div><div class="table-card">${responses.length ? responses.map(({ response, index }) => reviewRecord(response, index, record)).join('') : '<div class="empty"><p>当前筛选下没有题目。</p></div>'}</div>`, 'history');
+  return shell(`<button class="ghost" data-action="history-back" style="margin-top:22px;padding-left:0">← 全部记录</button>${resultMarkup(record)}<div class="filter-row">${[['all', '全部题目'], ['incorrect', '只看答错'], ['correct', '只看答对'], ['other', '跳过与未答']].map(([value, label]) => `<button class="${recordFilter === value ? 'active' : ''}" data-action="record-filter" data-value="${value}">${label}</button>`).join('')}<span class="quiet">${responses.length} 条</span></div><div class="table-card">${responses.length ? responses.map(({ response, index }) => reviewRecord(response, index, record)).join('') : '<div class="empty"><p>当前筛选下没有题目。</p></div>'}</div>`, 'history');
 }
 
 function render() {
-  root.innerHTML = ({ home, history, about, practice: renderSession, results, detail }[route] ?? home)();
+  root.innerHTML = ({ home, users, history, about, practice: renderSession, results, detail }[route] ?? home)();
   if (route === 'practice') {
     const video = root.querySelector('[data-question-video]');
     if (video && session.current?.videoTime) video.addEventListener('loadedmetadata', () => { video.currentTime = Math.min(session.current.videoTime, video.duration || 0); }, { once: true });
@@ -287,19 +309,35 @@ function render() {
 }
 
 function updateSessionList(value) {
-  const index = sessions.findIndex((s) => s.id === value.id);
-  if (index < 0) sessions.unshift(value); else sessions[index] = value;
-  sessions.sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
+  const index = allSessions.findIndex((s)=>s.id===value.id);
+  if (index < 0) allSessions.unshift(value); else allSessions[index] = value;
+  allSessions.sort((a,b)=>Date.parse(b.startedAt)-Date.parse(a.startedAt));
+  sessions = allSessions.filter((s)=>s.userId===currentProfile?.id && s.userId);
+}
+function updateProfile(profile) {
+  if (!profile) return;
+  const old = profiles.find((p)=>p.id===profile.id);
+  const merged = mergeProfiles(old, profile);
+  profiles = [merged, ...profiles.filter((p)=>p.id!==profile.id)];
+  if (currentProfile?.id === profile.id) currentProfile = mergeProfiles(currentProfile, merged);
+}
+async function reloadLocalData() {
+  [allSessions, profiles] = await Promise.all([store.all(), store.profiles()]);
+  if (currentProfile) currentProfile = profiles.find((p)=>p.id===currentProfile.id) ?? currentProfile;
+  sessions = allSessions.filter((s)=>s.userId===currentProfile?.id && s.userId);
+  for (const id of Object.keys(exposures)) delete exposures[id];
+  for (const s of sessions) for (const r of s.responses) exposures[r.questionId] = (exposures[r.questionId] ?? 0)+1;
 }
 function persist(force = true) {
   if (!session || !store) return;
   const snapshot = snapshotSession(session);
   try { saveCheckpoint(snapshot); } catch { toast('浏览器检查点空间不足，练习记录仍会尝试保存。请及时导出备份。'); }
   updateSessionList(snapshot);
+  if (currentProfile?.id === snapshot.userId) updateProfile(rememberSession(currentProfile, snapshot, getQuestion));
   checkpointAt = Date.now();
   if (force || Date.now() - savedAt > 4500) {
     savedAt = Date.now();
-    saveQueue = saveQueue.then(() => store.save(snapshot)).catch((error) => toast(`记录保存失败：${error.message}。请导出本次备份。`));
+    saveQueue = saveQueue.then(() => store.save(snapshot)).then(updateProfile).catch((error) => toast(`记录保存失败：${error.message}。请导出本次备份。`));
   }
 }
 function nextQuestion() {
@@ -309,16 +347,21 @@ function nextQuestion() {
   const north = session.version >= 3 && session.practiceMode === 'north';
   const pool = north ? practiceBank.categories[id] : bank.categories[id];
   let question;
-  if (north && id === 'memory') {
-    const family = chooseFamily(MEMORY_FAMILIES, session, id);
-    question = generateVisualMemory(family, targetLevel(session, family));
-  } else question = chooseQuestion(pool, session, id, exposures);
-  if (!question && id === 'memory' && !north) question = generatedMemory(session.version >= 3 ? targetLevel(session, 'memory-sequence-grid') : session.levels[id]);
-  if (!question) {
-    question = chooseQuestion(pool, { ...session, responses: [], current: null }, id, exposures);
-    toast('本类题目已练过一遍，继续巩固相近档位。');
+  if (north && id === 'memory') question = selectUserMemory(session, currentProfile);
+  else question = selectUserQuestion(pool, session, currentProfile);
+  if (!question && id === 'memory' && !north) {
+    const seen = new Set(currentProfile.memoryPatterns);
+    for (let attempt = 0; attempt < 512; attempt++) {
+      const generated = generatedMemory(session.version >= 3 ? targetLevel(session, 'memory-sequence-grid') : session.levels[id]);
+      if (session.reviewCategories?.includes(id) || !seen.has(memorySignature(generated))) { question = generated; break; }
+    }
   }
-  if (!question) { toast('此类题目暂不可用。进度已暂停。'); session = pauseSession(session); persist(); return render(); }
+  if (!question && session.reviewCategories?.includes(id)) question = chooseQuestion(pool, { ...session, responses: [], current: null }, id, exposures);
+  if (!question) {
+    session.current = null; session.exhaustedCategory = id;
+    persist(); render(); return;
+  }
+  delete session.exhaustedCategory;
   session = beginQuestion(session, question);
   lastMemoryVisual = '';
   persist(); render();
@@ -404,27 +447,45 @@ async function confirmDialog(title, body, label, onConfirm, destructive = false)
   modal.querySelector('#modal-confirm').addEventListener('click', async () => { modal.close(); await onConfirm(); }, { once: true });
 }
 function downloadBackup(records) {
-  const data = { app: 'cognitive-practice', version: 1, exportedAt: new Date().toISOString(), sessions: records };
+  const profile = currentProfile && records.every((r)=>r.userId===currentProfile.id) ? currentProfile : null;
+  const data = userBackup(records, profile);
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
-  link.href = url; link.download = `思维练习记录-${dateKey(Date.now())}.json`; link.click();
+  link.href = url; link.download = `思维练习记录-${profile?.username ?? '未归属'}-${dateKey(Date.now())}.json`; link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   toast(`已导出 ${records.length} 次练习记录。`);
 }
 
 const actions = {
-  home: () => navigate('home'), history: () => navigate('history'), about: () => navigate('about'),
+  home: () => { viewingLegacy = false; navigate('home'); }, history: () => { viewingLegacy = false; navigate('history'); }, about: () => navigate('about'),
+  users: () => navigate('users'),
+  'history-back': () => navigate('history'),
+  legacy: () => { viewingLegacy = true; navigate('history'); },
+  'enter-user': async (element) => {
+    if (!store || !bootReady) return;
+    const name = element?.dataset.name ?? document.querySelector('#username')?.value;
+    usernameIdentity(name);
+    if (session?.status === 'running') { session = pauseSession(session); persist(); }
+    await saveQueue;
+    currentProfile = await store.enter(name); saveActiveUser(currentProfile.id);
+    session = null; viewingLegacy = false; selectedSessionId = null; recordFilter = 'all'; dateFilter = '';
+    await reloadLocalData();
+    ({ minutes, mode: practiceMode } = readPreferences(currentProfile.id));
+    route = 'home'; render(); window.scrollTo({top:0});
+  },
+  'claim-legacy': () => currentProfile && confirmDialog(`把旧记录归入${currentProfile.username}？`, `将${legacyRecords().length}条未归属记录连同未完成进度归入这个用户名，并用于个人去重与难度衔接。`, '确认归入', async () => { await saveQueue; const result = await store.claimLegacy(currentProfile.id); currentProfile = result.profile; await reloadLocalData(); viewingLegacy = false; route = 'home'; render(); toast(`已归入${result.count}条旧记录。`); }),
+  'review-section': () => { if (!session || session.status !== 'running') return; session.reviewCategories = [...new Set([...(session.reviewCategories ?? []), CATEGORIES[session.sectionIndex].id])]; nextQuestion(); },
   reload: () => location.reload(),
   mode: (element) => { if (!['north', 'extended'].includes(element.dataset.value)) return; practiceMode = element.dataset.value; savePrefs(); render(); },
   duration: (element) => { minutes = Number(element.dataset.value); savePrefs(); render(); },
   start: async () => {
-    if (!bank || !practiceBank || !store || activeCandidate()) return;
+    if (!bank || !practiceBank || !store || !currentProfile || activeCandidate()) return;
     const input = document.querySelector('#minutes');
     const value = input ? Number(input.value) : minutes;
     if (!Number.isInteger(value) || value < 4 || value > 180) return toast('请输入 4–180 之间的整数分钟数。');
     minutes = value; savePrefs();
-    session = createSession(minutes, Date.now(), crypto.randomUUID(), practiceMode);
+    session = createUserSession(currentProfile, minutes, practiceMode);
     route = 'practice'; nextQuestion();
     window.scrollTo({ top: 0 });
   },
@@ -475,15 +536,17 @@ const actions = {
   detail: (element) => { selectedSessionId = element.dataset.id; recordFilter = 'all'; navigate('detail'); },
   'record-filter': (element) => { recordFilter = element.dataset.value; render(); },
   'clear-date': () => { dateFilter = ''; render(); },
-  export: () => downloadBackup(sessions),
-  'export-one': (element) => { const record = sessions.find((s) => s.id === element.dataset.id); if (record) downloadBackup([record]); },
+  export: () => downloadBackup(visibleRecords()),
+  'export-one': (element) => { const record = visibleRecords().find((s) => s.id === element.dataset.id); if (record) downloadBackup([record]); },
   'export-current': () => { persist(); downloadBackup([snapshotSession(session)]); },
   import: () => document.querySelector('#import-file').click(),
-  'delete-record': (element) => confirmDialog('删除这次练习记录？', '这只会删除当前浏览器里的这一条记录。若已经导出备份，仍可以重新导入。', '删除记录', async () => {
-    await saveQueue; await store.remove(element.dataset.id);
-    sessions = sessions.filter((s) => s.id !== element.dataset.id);
-    if (session?.id === element.dataset.id) { session = null; localStorage.removeItem('cognitive-practice.checkpoint.v1'); }
-    if (readCheckpoint()?.id === element.dataset.id) localStorage.removeItem('cognitive-practice.checkpoint.v1');
+  'delete-record': (element) => confirmDialog('删除这次练习记录？', '这只会删除当前浏览器里的这一条记录。已学难度和去重清单会保留；若已经导出备份，记录仍可重新导入。', '删除记录', async () => {
+    await saveQueue; await store.remove(element.dataset.id, viewingLegacy ? null : currentProfile?.id);
+    const old = allSessions.find((s)=>s.id===element.dataset.id);
+    allSessions = allSessions.filter((s)=>s.id!==element.dataset.id);
+    sessions = sessions.filter((s)=>s.id!==element.dataset.id);
+    if (session?.id === element.dataset.id) session = null;
+    clearCheckpoint(element.dataset.id, old?.userId);
     route = 'history'; render(); toast('这次练习记录已删除。');
   }, true),
   zoom: (element) => { const src = safeAsset(element.dataset.src); if (!src) return; modal.className = 'modal image-modal'; modal.innerHTML = `<button class="ghost" data-action="close-modal">关闭 ×</button><img src="${src}" alt="放大的题目图形">`; modal.showModal(); },
@@ -520,11 +583,14 @@ document.addEventListener('change', async (event) => {
   try {
     await saveQueue;
     const count = await store.import(await file.text());
-    sessions = await store.all();
-    if (session && ['running', 'paused'].includes(session.status)) updateSessionList(snapshotSession(session));
-    const pending = activeCandidate();
-    if (pending) saveCheckpoint(pending);
-    route = 'history'; render(); toast(`已导入或更新 ${count} 次练习记录。`);
+    session = null;
+    await reloadLocalData();
+    if (!currentProfile && profiles.length === 1) {
+      currentProfile = profiles[0]; saveActiveUser(currentProfile.id); await reloadLocalData();
+      ({ minutes, mode: practiceMode } = readPreferences(currentProfile.id));
+    }
+    viewingLegacy = !currentProfile;
+    route = currentProfile || legacyRecords().length ? 'history' : 'users'; render(); toast(`已导入或更新 ${count} 次练习；用户档案按用户名合并。`);
   } catch (error) { toast(error.message); }
 });
 document.addEventListener('keydown', (event) => {
@@ -547,20 +613,38 @@ window.addEventListener('pagehide', () => { if (session && ['running', 'paused']
 window.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
 modal.addEventListener('click', (event) => { if (event.target === modal) { const rect = modal.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) modal.close(); } });
 
+document.addEventListener('submit', async (event) => {
+  if (event.target.id !== 'user-form') return;
+  event.preventDefault();
+  const button = event.target.querySelector('button[type="submit"]'); button.disabled = true;
+  try { await actions['enter-user'](); } catch (error) { button.disabled = false; toast(error.message); }
+});
+
 async function boot() {
   render();
-  const bankPromise = fetch('data/bank.json').then((response) => { if (!response.ok) throw new Error('题库加载失败，请检查网络后重试。'); return response.json(); });
-  const practicePromise = fetch('data/practice-bank.json').then((response) => { if (!response.ok) throw new Error('北中主练题库加载失败，请重新加载。'); return response.json(); }).then((value) => { practiceBank = value; for (const list of Object.values(value.categories)) for (const q of list) practiceQuestions.set(q.id, q); }).catch((error) => { loadError = error.message; });
-  const storagePromise = openStore().then(async (value) => { store = value; sessions = await store.all();
-    const checkpoint = readCheckpoint();
-    if (checkpoint && (!sessions.some((s) => s.id === checkpoint.id) || sessions.find((s) => s.id === checkpoint.id).updatedAt <= checkpoint.updatedAt)) { updateSessionList(checkpoint); await store.save(checkpoint); }
-    sessions = sessions.map((s) => s.status === 'running' ? { ...s, status: 'paused', anchorAt: null } : s);
-  }).catch((error) => { storageError = `记录存储暂不可用：${error.message}`; store = null; });
-  await Promise.all([bankPromise.then((value) => { bank = value;
-    for (const list of Object.values(bank.categories)) for (const q of list) questions.set(q.id, q);
-  }).catch((error) => { loadError = error.message; }), practicePromise, storagePromise]);
-  for (const record of sessions) for (const response of record.responses) exposures[response.questionId] = (exposures[response.questionId] ?? 0) + 1;
-  render();
-  setInterval(tick, 30);
+  const loadBank = async (path) => { const response = await fetch(path); if (!response.ok) throw new Error('题库加载失败，请检查网络后重试。'); return response.json(); };
+  const bankPromise = Promise.all([loadBank('data/bank.json'), loadBank('data/practice-bank.json')]).then(([full, main]) => {
+    bank = full; practiceBank = main;
+    for (const list of Object.values(full.categories)) for (const q of list) questions.set(q.id,q);
+    for (const list of Object.values(main.categories)) for (const q of list) practiceQuestions.set(q.id,q);
+  }).catch((error)=>{loadError=error.message;});
+  const storagePromise = openStore(getQuestion).then((value)=>{store=value;}).catch((error)=>{storageError=`记录存储暂不可用：${error.message}`;});
+  await Promise.all([bankPromise, storagePromise]);
+  if (store) {
+    try {
+      await reloadLocalData();
+      for (const checkpoint of readCheckpoints()) {
+        const old = allSessions.find((s)=>s.id===checkpoint.id);
+        if (!old || old.updatedAt <= checkpoint.updatedAt) await store.save(checkpoint);
+      }
+      await reloadLocalData();
+      currentProfile = profiles.find((p)=>p.id===readActiveUser()) ?? null;
+      await reloadLocalData();
+      if (currentProfile) ({minutes, mode:practiceMode}=readPreferences(currentProfile.id));
+      allSessions = allSessions.map((s)=>s.status==='running'?{...s,status:'paused',anchorAt:null}:s);
+      sessions = allSessions.filter((s)=>s.userId===currentProfile?.id && s.userId);
+    } catch (error) {storageError=`读取用户档案失败：${error.message}`;}
+  }
+  bootReady = true; render(); setInterval(tick,30);
 }
 boot();

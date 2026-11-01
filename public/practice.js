@@ -11,7 +11,7 @@ export const FAMILY_NAMES = {
 };
 
 export function taskFamily(question) {
-  if (question.taskFamily) return question.taskFamily;
+  if (typeof question.taskFamily === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9:_-]{0,99}$/.test(question.taskFamily) && !['constructor', 'prototype'].includes(question.taskFamily)) return question.taskFamily;
   if (question.sourceId === 'mars_ib') return 'matrix-choice';
   if (question.sourceId === 'omib') return 'matrix-construction';
   if (question.sourceId === 'bigbench_logical_deduction') return 'verbal-order';
@@ -176,4 +176,8 @@ export function validStoredQuestion(question) {
     return grid && Array.isArray(question.sequence) && question.sequence.length > 0 && question.sequence.length <= 32 && question.sequence.every((n) => Number.isInteger(n) && n >= 0 && n <= 999) && Array.isArray(question.answer) && question.answer.length === question.sequence.length && question.answer.every((n, i) => n === question.sequence[i]);
   }
   return false;
+}
+
+export function generatedMemorySignature(q) {
+  return `${taskFamily(q)}|${q.gridRows ?? '-'}x${q.gridColumns ?? '-'}|${q.sequence?.join(',') ?? ''}`;
 }
