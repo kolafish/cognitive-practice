@@ -165,11 +165,21 @@ test('main pool contains only curated tasks; folding options require position re
   assert.equal(bank.categories.figure.length, 80);
   assert.equal(new Set(all.map((q) => q.id)).size, all.length);
   const original = new Map(Object.values(fullBank.categories).flat().map((q) => [q.id,q]));
+  const authored = bank.categories.verbal.filter((q) => q.sourceId === 'north-original-analogy');
+  assert.equal(new Set(authored.map((q) => q.prompt)).size, authored.length);
+  assert.ok(bank.sources.some((source) => source.id === 'north-original-analogy'));
+  for (const level of [6, 7, 8]) assert.ok(authored.some((q) => q.familyLevel === level));
   for (const q of all) {
     assert.ok(validStoredQuestion(q), q.id);
     assert.ok(q.curationReason && q.sourceQuestionId && Number.isInteger(q.familyLevel), q.id);
     assert.equal(q.promptNeedsOriginal ?? false, false);
-    assert.ok(original.has(q.sourceQuestionId));
+    if (q.sourceId === 'north-original-analogy') {
+      assert.equal(q.taskFamily, 'verbal-analogy');
+      assert.ok([6, 7, 8].includes(q.familyLevel));
+      assert.equal(q.sourceQuestionId, q.id);
+      assert.equal(new Set(q.choices.map((choice) => choice.text)).size, 4);
+      assert.ok(q.explanation);
+    } else assert.ok(original.has(q.sourceQuestionId));
     assert.ok(['matrix-choice','folding-static','folding-animation','verbal-order','verbal-analogy'].includes(taskFamily(q)));
     assert.equal(gradeAnswer(q, q.answer), true);
     if (q.type === 'folding-choice') {

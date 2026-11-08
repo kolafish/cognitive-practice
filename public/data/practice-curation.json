@@ -52659,12 +52659,12 @@
     "ekar-e6dc26-zh": "种类归属与季节组成的语义区别容易有不同解读，保守排除。"
   },
   "mainPoolSummary": {
-    "total": 1608,
+    "total": 1644,
     "byCategory": {
       "figure": 80,
       "memory": 0,
       "spatial": 512,
-      "verbal": 1016
+      "verbal": 1052
     },
     "byTaskFamily": {
       "matrix-choice": {
@@ -52755,7 +52755,7 @@
       },
       "verbal-analogy": {
         "name": "常见词关系类比",
-        "count": 20,
+        "count": 56,
         "levels": [
           1,
           2,
@@ -52772,9 +52772,9 @@
           "3": 3,
           "4": 3,
           "5": 2,
-          "6": 2,
-          "7": 2,
-          "8": 2
+          "6": 14,
+          "7": 14,
+          "8": 14
         }
       }
     },

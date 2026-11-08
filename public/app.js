@@ -98,7 +98,10 @@ function footer() {
   return '<footer class="footer"><div>每一次专注，都留下一点进步。<span class="num"> THINKING ROOM</span></div><div>记录仅保存在当前浏览器 · <a href="attributions.html">题库来源与许可</a> · 非商业练习</div></footer>';
 }
 function shell(content, active = route) { return `<div class="wrap">${header(active)}<main id="main" class="fade-in">${content}</main>${footer()}</div>`; }
-function sourceName(id) { return bank?.sources.find((s) => s.id === id)?.name ?? ({ generated: '练习生成', 'generated-north': '原创视觉记忆练习', 'local-mars-variant': '本地 MaRs-IB 变式', 'local-sandia': '本地 Sandia 矩阵' }[id] ?? id); }
+function sourceName(id) {
+  return practiceBank?.sources.find((s) => s.id === id)?.name ?? bank?.sources.find((s) => s.id === id)?.name
+    ?? ({ generated: '练习生成', 'generated-north': '原创视觉记忆练习', 'local-mars-variant': '本地 MaRs-IB 变式', 'local-sandia': '本地 Sandia 矩阵' }[id] ?? id);
+}
 function modeName(record) { return MODES[record?.practiceMode] ?? MODES.legacy; }
 function getQuestion(current = session?.current, parent = session) { return current?.generatedQuestion ?? current?.questionSnapshot ?? (parent?.practiceMode === 'north' ? practiceQuestions.get(current?.questionId) : null) ?? questions.get(current?.questionId); }
 function questionFamilyName(question) { return question?.taskFamilyName ?? familyName(taskFamily(question)); }

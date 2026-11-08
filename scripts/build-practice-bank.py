@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a conservative main-practice subset without downloading new questions.
+"""Build main practice from reviewed source items and original word analogies.
 
 A committed audit manifest makes ordinary builds Python-stdlib-only. Regenerate
 media/BIG audits with --audit using Pillow, numpy and a local ffmpeg executable.
@@ -22,6 +22,13 @@ ROOT = Path(__file__).resolve().parents[1]
 PUBLIC = ROOT / "public"
 CACHE = PUBLIC / "data/practice-curation.json"
 OUTPUT = PUBLIC / "data/practice-bank.json"
+ORIGINAL_ANALOGIES = ROOT / "assets/north-verbal-analogies.json"
+ORIGINAL_ANALOGY_SOURCE = {"id": "north-original-analogy", "name": "思维练习室原创词语类比"}
+ANALOGY_LEVEL_BASIS = {
+    6: "三项按顺序对应两层关系。",
+    7: "三项按顺序对应，需从相近选项中区分关系方向或第三项的具体作用。",
+    8: "四项按顺序对应，需核对整条关系链，并排除只符合部分关系的选项。",
+}
 
 # Each item below was read with its complete choices, source key and explanation.
 # Levels describe estimated relational complexity within this small reviewed pool.
@@ -276,6 +283,37 @@ def add_meta(q, family, level, reason, basis):
     return item
 
 
+def original_analogies():
+    rows = json.loads(ORIGINAL_ANALOGIES.read_text())
+    assert len({row["key"] for row in rows}) == len(rows), "Duplicate original analogy ID"
+    assert len({row["stem"] for row in rows}) == len(rows), "Duplicate original analogy stem"
+    for row in rows:
+        key, level = row["key"], row["level"]
+        assert re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", key), key
+        basis = ANALOGY_LEVEL_BASIS[level]
+        terms = 4 if level == 8 else 3
+        options = row["distractors"][:]
+        assert len(options) == 3 and len({row["stem"], row["correct"], *options}) == 5, key
+        assert all(len(option.split("／")) == terms and all(part.strip() for part in option.split("／"))
+                   for option in [row["stem"], row["correct"], *options]), key
+        assert row["explanation"].strip(), key
+        correct_index = int(short_hash(key), 16) % 4
+        options.insert(correct_index, row["correct"])
+        item = {
+            "id": "north-analogy-" + key,
+            "sourceId": ORIGINAL_ANALOGY_SOURCE["id"],
+            "originalFamily": "chinese_analogy",
+            "originalDifficulty": {"status": "unrated", "label_zh": "原创题，无外部难度标定", "value": None},
+            "category": "verbal", "type": "choice", "level": level,
+            "prompt": f"{row['stem']}。选择词语关系和顺序最相近的一项。",
+            "choices": [{"id": letter, "text": text} for letter, text in zip("ABCD", options)],
+            "answer": "ABCD"[correct_index], "explanation": row["explanation"],
+        }
+        yield add_meta(item, "verbal-analogy", level,
+                       "原创。逐题核对完整关系、关系顺序与干扰项。",
+                       f"本题族练习估算。{basis}未按作答数据校准。")
+
+
 def build(bank, audits):
     categories = {"figure": [], "memory": [], "spatial": [], "verbal": []}
     exclusions = []
@@ -390,22 +428,24 @@ def build(bank, audits):
     assert not included_original_ids & excluded_ids
     assert len(excluded_ids) == len(exclusions)
     assert included_original_ids | excluded_ids == by_id.keys()
+    authored = list(original_analogies())
+    categories["verbal"].extend(authored)
     family_stats = {}
     for family, name in FAMILY_NAMES.items():
         qs = [q for items in categories.values() for q in items if q["taskFamily"] == family]
         levels = Counter(q["familyLevel"] for q in qs)
         family_stats[family] = {"name": name, "count": len(qs), "levels": sorted(levels), "byLevel": {str(k): levels[k] for k in sorted(levels)}}
     return {
-        "version": 1, "categories": categories, "sources": bank["sources"],
+        "version": 1, "categories": categories, "sources": [*bank["sources"], ORIGINAL_ANALOGY_SOURCE],
         "stats": {"total": sum(map(len, categories.values())), "byCategory": {k: len(v) for k, v in categories.items()}, "byTaskFamily": family_stats},
         "curation": {
-            "scope": "北中主练：现有公开题的保守练习子集，不是北京中学真题，也无年龄常模。",
+            "scope": "北中主练。筛选公开题，并补充原创词语类比。题目用于练习，无年龄常模。",
             "sourceBankSha256": audits["sourceBankSha256"],
             "difficulty": "familyLevel只在同taskFamily内用于练习自适应；支持档位见stats.byTaskFamily.*.levels；不跨来源比较。",
             "memory": "此静态主池留空，由网站独立的可复现原创视觉记忆生成器提供。",
             "auditManifest": "data/practice-curation.json", "excluded": exclusions,
             "exclusionCounts": dict(sorted(Counter(e["reasonCode"] for e in exclusions).items())),
-            "analogyManualReview": {"selected": len(ANALOGY), "reviewedExcluded": len(REVIEWED_REJECTIONS), "unlisted": "未入白名单不等于逐题判错；保留拓展待审。"},
+            "analogyManualReview": {"selected": len(ANALOGY), "original": len(authored), "reviewedExcluded": len(REVIEWED_REJECTIONS), "unlisted": "未入白名单不等于逐题判错；保留拓展待审。"},
             "foldingVideoAuditBoundary": f"仅候选{len(audits['videoAudit'])}段视频逐解码帧降采样边界扫描；忽略均匀开场帧，非全分辨率逐帧人工核验。答案图使用保守灰色纸张边界检测。",
         },
     }
