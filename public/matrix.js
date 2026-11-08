@@ -1,5 +1,6 @@
-import { readActiveUser } from './storage.js';
-import { MAX_MATRIX_PACK_BYTES, MATRIX_SECTIONS, openMatrixStore, parseMatrixPack } from './matrix-pack.js';
+import { openStore, readActiveUser } from './storage.js';
+import { unseenQuestions } from './profiles.js';
+import { MAX_MATRIX_PACK_BYTES, MATRIX_SECTIONS, northMatrixQuestions, openMatrixStore, parseMatrixPack } from './matrix-pack.js';
 
 const content = document.querySelector('#matrix-content');
 const errorBox = document.querySelector('#matrix-error');
@@ -7,9 +8,11 @@ const fileInput = document.querySelector('#matrix-file');
 const owner = readActiveUser();
 if (owner) document.querySelector('#matrix-owner').textContent = `当前档案 · ${owner.slice('user:'.length)}`;
 const answers = new Map();
+let seenInNorth = new Set();
 const imageUrls = [];
 let store, pack, question, kind, selected, startedAt;
 let saving = false;
+const seen = (q) => answers.has(q.id) || seenInNorth.has(q.id);
 
 function showError(message = '') {
   errorBox.hidden = !message;
@@ -32,14 +35,14 @@ function practiceMarkup() {
   const section = MATRIX_SECTIONS[kind];
   const pool = pack.questions.filter((q) => q.kind === kind);
   const record = answers.get(question.id);
-  const progress = pool.filter((q) => answers.has(q.id)).length;
+  const progress = pool.filter((q) => seen(q)).length;
   const choices = Array.from({ length: question.options ? 4 : 8 }, (_, index) => {
     const label = optionLabel(index);
     const chosen = index === (record?.selected ?? selected);
     const resultClass = record ? index === question.answer ? ' is-correct' : chosen ? ' is-wrong' : '' : '';
     return `<button type="button" class="choice matrix-choice${resultClass}" data-choice="${index}" aria-label="选项 ${label}" aria-pressed="${chosen}" ${record ? 'disabled' : ''}><b>${label}</b>${question.options ? image(question.options[index], `选项 ${label} 的图形`) : ''}</button>`;
   }).join('');
-  return `<div class="matrix-toolbar"><button class="secondary" data-action="overview">← 补充练习</button><span>已答 ${progress} / ${pool.length} 道</span></div>
+  return `<div class="matrix-toolbar"><button class="secondary" data-action="overview">← 补充练习</button><span>已见 ${progress} / ${pool.length} 道</span></div>
     <article class="matrix-card"><h1 tabindex="-1">${section.name}</h1>
       <p class="quiet">观察图形规律，选出能补全矩阵的一项。</p>
       <div class="matrix-stem">${image(question.image, '待补全的矩阵')}</div>
@@ -55,7 +58,7 @@ function render(focus = '') {
   if (!owner) {
     content.innerHTML = heading('矩阵补充练习', '先回到首页进入你的用户名档案，再打开矩阵补充练习。');
   } else if (!pack) {
-    content.innerHTML = `${heading('矩阵补充练习', '导入收到的题包，一次导入后就能接着做。')}<section class="matrix-card"><h2>从本机选择题包</h2><p class="quiet">请选择矩阵题包 JSON 文件。题目和答题记录都保存在这个浏览器。</p><button class="primary" data-action="import">导入本地题包</button></section>`;
+    content.innerHTML = `${heading('矩阵补充练习', '导入一次，回首页选「北中主练」，题包就会加入图形段。')}<section class="matrix-card"><h2>从本机选择题包</h2><p class="quiet">请选择矩阵题包 JSON 文件。题目和答题记录都保存在这个浏览器。</p><button class="primary" data-action="import">导入本地题包</button></section>`;
   } else if (question) {
     content.innerHTML = practiceMarkup();
   } else {
@@ -64,10 +67,12 @@ function render(focus = '') {
       if (!pool.length) return '';
       const records = pool.map((q) => answers.get(q.id)).filter(Boolean);
       const total = records.filter((r) => r.correct).length;
+      const northCount = pool.filter((q) => seenInNorth.has(q.id) && !answers.has(q.id)).length;
+      const complete = records.length + northCount === pool.length;
       const label = records.length ? '继续练习' : '开始练习';
-      return `<section class="matrix-card"><h2>${section.name}</h2><p class="quiet">${section.note}</p><p class="matrix-progress">已答 <b>${records.length} / ${pool.length}</b> · 答对 <b>${total}</b> · 答错 <b>${records.length - total}</b></p><button class="primary" data-kind="${key}" ${records.length === pool.length ? 'disabled' : ''}>${records.length === pool.length ? '本组已完成' : label}</button></section>`;
+      return `<section class="matrix-card"><h2>${section.name}</h2><p class="quiet">${section.note}</p><p class="matrix-progress">专项已答 <b>${records.length} / ${pool.length}</b> · 答对 <b>${total}</b> · 答错 <b>${records.length - total}</b>${northCount ? ` · 主练已见 ${northCount}` : ''}</p><button class="primary" data-kind="${key}" ${complete ? 'disabled' : ''}>${complete ? '本组已练完' : label}</button></section>`;
     }).join('');
-    content.innerHTML = `${heading('矩阵补充练习', '每组单独记录进度。答完一题就保存，下次从未做过的题继续。')}<div class="matrix-sections">${sections}</div>
+    content.innerHTML = `${heading('矩阵补充练习', '本地题包已加入北中主练的图形段。也可以在这里单独练；已见题两边共享去重。')}<div class="matrix-sections">${sections}</div>
       <div class="button-row matrix-export"><button class="secondary" data-action="export" ${answers.size ? '' : 'disabled'}>导出专项记录</button></div>`;
   }
   content.querySelector(focus || 'h1[tabindex]')?.focus({ preventScroll: true });
@@ -76,11 +81,17 @@ function render(focus = '') {
 async function loadAnswers() {
   answers.clear();
   for (const record of await store.answers(owner, pack.id)) answers.set(record.questionId, record);
+  const profiles = await openStore().then((mainStore) => mainStore.profiles()).catch(() => []);
+  const profile = profiles.find((item) => item.id === owner);
+  if (profile) {
+    const fresh = new Set(unseenQuestions(northMatrixQuestions(pack), profile).map((q) => q.matrixItemId));
+    seenInNorth = new Set(pack.questions.filter((q) => !fresh.has(q.id)).map((q) => q.id));
+  }
 }
 
 function startQuestion(section) {
   kind = section;
-  question = pack.questions.find((q) => q.kind === kind && !answers.has(q.id));
+  question = pack.questions.find((q) => q.kind === kind && !seen(q));
   selected = undefined;
   render();
   startedAt = performance.now();

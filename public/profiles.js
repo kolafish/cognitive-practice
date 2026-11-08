@@ -1,5 +1,5 @@
 import { createSession, chooseQuestion, parseBackup } from './engine.js';
-import { taskFamily, generateVisualMemory, generatedMemorySignature } from './practice.js';
+import { taskFamily, generateVisualMemory, generatedMemorySignature, isMatrixVariant, isUnratedMatrix } from './practice.js';
 
 export function usernameIdentity(value) {
   const username = String(value ?? '').normalize('NFKC').trim().replace(/\s+/gu, ' ');
@@ -63,6 +63,7 @@ export function rememberSession(profile, session, resolve = (r) => r.generatedQu
     // Even an unanswered stimulus has been seen; its level is left unchanged.
     remember(record);
     if (!['correct', 'incorrect', 'skipped'].includes(record.status)) return;
+    if (isMatrixVariant(record) || isUnratedMatrix(record)) return;
     const q = resolve(record, session);
     const family = session.version >= 3 ? record.taskFamily : q ? taskFamily(q) : null;
     if (typeof family !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9:_-]{0,99}$/.test(family) || ['constructor','prototype'].includes(family)) return;
@@ -90,6 +91,26 @@ export function selectUserQuestion(pool, session, profile, random = Math.random)
   const review = session.reviewCategories?.includes(category);
   const candidates = review ? pool : unseenQuestions(pool, profile);
   return chooseQuestion(candidates, session, category, {}, random);
+}
+
+export function selectNorthFigure(pool, supplement, session, profile, standaloneSeen = new Set(), random = Math.random) {
+  const original = selectUserQuestion(pool, session, profile, random);
+  if (!supplement.length) return original;
+  const seenIds = new Set(session.responses.map((record) => record.questionId));
+  if (session.current) seenIds.add(session.current.questionId);
+  const available = unseenQuestions(supplement, profile).filter((q) => !standaloneSeen.has(q.matrixItemId) && !seenIds.has(q.id));
+  const figures = session.responses.filter((record) => record.category === 'figure');
+  const unrated = figures.filter(isUnratedMatrix).length;
+  const sandia = available.filter(isUnratedMatrix);
+  if (sandia.length && unrated < Math.floor((figures.length - unrated) / 4)) return sandia[Math.floor(random() * sandia.length)];
+  const lastRated = figures.findLast((record) => !isUnratedMatrix(record));
+  if (session.familyLevels['matrix-choice'] === 4 && original?.familyLevel !== 4
+      && (!original || !isMatrixVariant(lastRated)) && !session.reviewCategories?.includes('figure')) {
+    const stems = new Set(figures.map((record) => record.questionSnapshot?.matrixVariantOf ?? record.questionId));
+    const variants = available.filter((q) => isMatrixVariant(q) && !stems.has(q.matrixVariantOf));
+    if (variants.length) return variants[Math.floor(random() * variants.length)];
+  }
+  return original ?? sandia[Math.floor(random() * sandia.length)] ?? null;
 }
 export function freshVisualMemory(family, level, profile, seed = () => crypto.randomUUID()) {
   const used = new Set(profile.memoryPatterns);

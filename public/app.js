@@ -4,11 +4,12 @@ import {
   summarize, trainingDurations, sectionTiming, sectionIndexAt, memoryDisplayDuration, memoryStage as computeMemoryStage,
 } from './engine.js';
 import { openStore, readCheckpoints, clearCheckpoint, saveCheckpoint, readPreferences, savePreferences, readActiveUser, saveActiveUser } from './storage.js';
-import { MODES, MEMORY_FAMILIES, familyName, taskFamily, targetLevel, presentedLevel } from './practice.js';
+import { MODES, MEMORY_FAMILIES, familyName, taskFamily, targetLevel, presentedLevel, isMatrixVariant, isUnratedMatrix, isPrivateMatrixAsset } from './practice.js';
+import { openMatrixStore, northMatrixQuestions } from './matrix-pack.js';
 
 import { LEVEL_POINTS, levelPoints, recordScore, scoreByFamily } from './scoring.js';
 
-import { createUserSession, rememberSession, mergeProfiles, selectUserQuestion, selectUserMemory, memorySignature, userBackup, usernameIdentity } from './profiles.js';
+import { createUserSession, rememberSession, mergeProfiles, selectUserQuestion, selectUserMemory, selectNorthFigure, memorySignature, userBackup, usernameIdentity } from './profiles.js';
 
 const root = document.querySelector('#app');
 const modal = document.querySelector('#modal');
@@ -23,7 +24,16 @@ const icons = {
   pause: '<svg viewBox="0 0 32 32" fill="currentColor" aria-hidden="true"><rect x="9" y="7" width="5" height="18" rx="1"/><rect x="19" y="7" width="5" height="18" rx="1"/></svg>',
 };
 const esc = (value = '') => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const safeAsset = (value) => typeof value === 'string' && /^assets\/[a-zA-Z0-9/_\-.]+$/.test(value) && !value.split('/').includes('..') ? value : '';
+function safeAsset(value) {
+  if (isPrivateMatrixAsset(value)) {
+    const [, packId, filename] = value.split('/');
+    const file = packId === localMatrixPack?.id && localMatrixPack.files.get(filename.slice(0, -4));
+    if (!file) return '';
+    if (!matrixUrls.has(value)) matrixUrls.set(value, URL.createObjectURL(file));
+    return matrixUrls.get(value);
+  }
+  return typeof value === 'string' && /^assets\/[a-zA-Z0-9/_\-.]+$/.test(value) && !value.split('/').includes('..') ? value : '';
+}
 const safeLink = (value) => /^https:\/\//.test(value ?? '') ? esc(value) : '#';
 const number = (value) => new Intl.NumberFormat('zh-CN').format(value);
 const statusText = (value) => ({ completed: '已完成', stopped: '提前结束', paused: '未完成', running: '进行中', correct: '答对', incorrect: '答错', skipped: '跳过', unanswered: '未作答' }[value] ?? value);
@@ -65,6 +75,10 @@ let toastTimer;
 let saveQueue = Promise.resolve();
 const questions = new Map();
 const practiceQuestions = new Map();
+let matrixStore, localMatrixPack, matrixOwner;
+let matrixQuestions = [];
+let matrixStandaloneSeen = new Set();
+const matrixUrls = new Map();
 const exposures = {};
 
 function toast(message) {
@@ -84,7 +98,7 @@ function footer() {
   return '<footer class="footer"><div>每一次专注，都留下一点进步。<span class="num"> THINKING ROOM</span></div><div>记录仅保存在当前浏览器 · <a href="attributions.html">题库来源与许可</a> · 非商业练习</div></footer>';
 }
 function shell(content, active = route) { return `<div class="wrap">${header(active)}<main id="main" class="fade-in">${content}</main>${footer()}</div>`; }
-function sourceName(id) { return bank?.sources.find((s) => s.id === id)?.name ?? ({ generated: '练习生成', 'generated-north': '原创视觉记忆练习' }[id] ?? id); }
+function sourceName(id) { return bank?.sources.find((s) => s.id === id)?.name ?? ({ generated: '练习生成', 'generated-north': '原创视觉记忆练习', 'local-mars-variant': '本地 MaRs-IB 变式', 'local-sandia': '本地 Sandia 矩阵' }[id] ?? id); }
 function modeName(record) { return MODES[record?.practiceMode] ?? MODES.legacy; }
 function getQuestion(current = session?.current, parent = session) { return current?.generatedQuestion ?? current?.questionSnapshot ?? (parent?.practiceMode === 'north' ? practiceQuestions.get(current?.questionId) : null) ?? questions.get(current?.questionId); }
 function questionFamilyName(question) { return question?.taskFamilyName ?? familyName(taskFamily(question)); }
@@ -104,11 +118,17 @@ function users() {
 function scoringNotice(info = null) {
   return `<p class="score-notice">训练积分：答对得实际档位 × 10分，其余0分。各题型难度未统一校准；积分受题量、时长和题型影响。${info?.hasEstimated ? '<br>含历史回算：依据旧记录的实际出题档位计算，未改写旧记录。' : ''}</p>`;
 }
+function sandiaStats(info) {
+  if (!info.unrated) return '';
+  const { correct, incorrect, skipped, unanswered, timeMs } = info.unrated;
+  return `<p class="quiet">Sandia 单列 · ${correct} 对 / ${incorrect} 错 · ${skipped} 跳过 · ${unanswered} 未答 · ${duration(timeMs)} · 不计积分及总体正确率</p>`;
+}
 function familyScoresMarkup(record) {
   const families = scoreByFamily(record, getQuestion);
   if (!families.length) return '';
   return `<details class="family-breakdown" open><summary>按小题型查看表现 <span>${families.length} 种 · 各档正确率与题量</span></summary><p class="quiet">每种题型分别观察。正确率为答对 ÷ 有效作答，跳过和未答另列；题量少时不宜据此判断稳定水平。</p><div class="family-score-grid">${families.map((family)=>{
-    const available = record.practiceMode === 'north' ? practiceBank?.stats.byTaskFamily[family.id]?.levels : null;
+    if (!family.levels.length) return `<article class="family-score-card"><h3>${esc(family.name)}</h3><p>${family.correct} 对 / ${family.incorrect} 错 · ${family.accuracy === null ? '尚无有效作答' : `正确率 ${Math.round(family.accuracy * 100)}%`}</p><div class="family-score-notes">${family.skipped} 跳过 · ${family.unanswered} 未答 · 未分档，不计积分</div></article>`;
+    const available = family.id === 'matrix-variant' ? [4] : record.practiceMode === 'north' ? practiceBank?.stats.byTaskFamily[family.id]?.levels : null;
     return `<article class="family-score-card"><div class="family-score-heading"><h3>${esc(family.name)}</h3><span>${number(family.points)}<small>积分</small></span></div><p>${family.correct} 对 / ${family.incorrect} 错 · ${family.accuracy === null ? '尚无有效作答' : `正确率 ${Math.round(family.accuracy * 100)}%`}</p><div class="level-score-grid">${family.levels.map((bucket)=>{
       const attempted = bucket.correct + bucket.incorrect;
       const unavailable = available && !available.includes(bucket.level);
@@ -130,7 +150,7 @@ function home() {
   const counts = (id) => !selectedBank ? '准备中' : practiceMode === 'north' && id === 'memory' ? '按档位随机生成' : `${number(selectedBank.categories[id].length)} 道题`;
   return shell(`
     ${profileSummary()}
-    <p class="matrix-home-entry"><a class="secondary" href="matrix.html">矩阵补充练习 →</a></p>
+    <p class="matrix-home-entry"><a class="secondary" href="matrix.html">矩阵补充练习 →</a>${matrixQuestions.length ? '<span class="quiet">本地题包已加入北中主练的图形段</span>' : ''}</p>
     ${pending ? `<section class="resume-banner"><div><strong>还有一段练习，可以接着完成</strong><p>${dateLabel(pending.startedAt)}开始 · ${esc(modeName(pending))} · 已练习 ${duration(pending.elapsedMs)}</p></div><div class="button-row"><button class="ghost" data-action="stop-pending" data-id="${esc(pending.id)}">结束这次</button><button class="primary" data-action="resume" data-id="${esc(pending.id)}">继续练习 ${arrow}</button></div></section>` : ''}
     ${loadError ? `<div class="error-banner">${esc(loadError)} <button class="ghost" data-action="reload">重新加载</button></div>` : ''}
     ${storageError ? `<div class="error-banner">${esc(storageError)}</div>` : ''}
@@ -169,7 +189,10 @@ function memoryStage(question, current, now = Date.now()) {
 function choiceButtons(question, draft, order, disabled = false) {
   const choices = order.map((id) => question.choices.find((c) => c.id === id)).filter(Boolean);
   const imageChoices = choices.every((c) => c.image || c.cells);
-  return `<div class="choices ${imageChoices ? 'image-choices' : ''} ${question.type === 'folding-choice' || question.type === 'memory-recognition' ? 'large-choices' : ''}" role="group" aria-label="选择答案">${choices.map((choice, index) => `<button class="choice ${String(draft) === String(choice.id) ? 'selected' : ''}" data-action="choice" data-id="${esc(choice.id)}" aria-label="选项${String.fromCharCode(65 + index)}${choice.image || choice.cells ? '' : `：${esc(choice.text ?? choice.id)}`}" aria-pressed="${String(draft) === String(choice.id)}" ${disabled ? 'disabled' : ''}><span class="choice-tag">${String.fromCharCode(65 + index)}</span>${choiceContent(question, choice, `选项${String.fromCharCode(65 + index)}`)}</button>`).join('')}</div>`;
+  return `<div class="choices ${imageChoices ? 'image-choices' : ''} ${question.type === 'folding-choice' || question.type === 'memory-recognition' ? 'large-choices' : ''} ${isUnratedMatrix(question) ? 'numbered-choices' : ''}" role="group" aria-label="选择答案">${choices.map((choice, index) => {
+    const label = isUnratedMatrix(question) ? String(index + 1) : String.fromCharCode(65 + index);
+    return `<button class="choice ${String(draft) === String(choice.id) ? 'selected' : ''}" data-action="choice" data-id="${esc(choice.id)}" aria-label="选项${label}${choice.image || choice.cells || isUnratedMatrix(question) ? '' : `：${esc(choice.text ?? choice.id)}`}" aria-pressed="${String(draft) === String(choice.id)}" ${disabled ? 'disabled' : ''}><span class="choice-tag">${label}</span>${isUnratedMatrix(question) ? '' : choiceContent(question, choice, `选项${label}`)}</button>`;
+  }).join('')}</div>`;
 }
 function choiceContent(question, choice, label = '图形') {
   if (choice.cells) return patternGrid(question, choice.cells, { mini: true, label });
@@ -204,7 +227,7 @@ function visualMemoryMarkup(question, current, stage) {
 }
 function imageMarkup(path, alt = '题目图形', extra = '') {
   const src = safeAsset(path);
-  return src ? `<img class="question-image ${extra}" src="${src}" alt="${esc(alt)}" data-action="zoom" data-src="${src}" loading="lazy"><p class="zoom-caption">点击图片可放大查看</p>` : '';
+  return src ? `<img class="question-image ${extra}" src="${src}" alt="${esc(alt)}" data-action="zoom" data-src="${esc(path)}" loading="lazy"><p class="zoom-caption">点击图片可放大查看</p>` : '';
 }
 
 function memoryMarkup(question, current) {
@@ -233,6 +256,7 @@ function constructionMarkup(question, current) {
 
 function formatAnswer(question, answer, order = []) {
   if (answer === null || answer === undefined) return '未作答';
+  if (isUnratedMatrix(question)) return `选项 ${answer}`;
   if (question.type === 'construction') return Array.isArray(answer) && answer.length ? `元素 ${answer.map((id) => Number(id) + 1).join('、')}` : '空白组合';
   if (['memory-grid', 'memory-digits'].includes(question.type)) return Array.isArray(answer) ? answer.join(' → ') : String(answer);
   if (question.type === 'folding-video') return `${answer} 个孔`;
@@ -246,15 +270,18 @@ function feedbackMarkup(question, response) {
   const isCorrect = response.status === 'correct';
   const earned = recordScore(session, response);
   const correctChoice = question.choices?.find((c) => String(c.id) === String(question.answer));
+  if (isMatrixVariant(question) || isUnratedMatrix(question)) return `<div class="feedback ${isCorrect ? '' : 'incorrect'}" role="status"><strong>${isCorrect ? '答对了' : response.status === 'skipped' ? '已跳过这道题' : '这道题再想一想'}</strong><p>${isUnratedMatrix(question) ? 'Sandia 单独统计，不计积分。' : `复习积分 +${earned.points} · 本题不调整矩阵档位。`}</p><p>正确答案：${esc(formatAnswer(question, question.answer, response.choicesOrder))}</p>${correctChoice?.image ? `<div class="correct-pattern">${choiceContent(question, correctChoice, '正确图形')}</div>` : ''}</div>`;
   return `<div class="feedback ${isCorrect ? '' : 'incorrect'}" role="status"><strong>${isCorrect ? '答对了' : response.status === 'skipped' ? '已跳过这道题' : '这道题再想一想'} · ${response.levelAfter > response.levelBefore ? '同类题提高一档' : response.levelAfter < response.levelBefore ? '同类题降低一档' : isCorrect ? '继续挑战最高档' : '继续从基础档练习'}</strong><div class="earned-points">+${earned.points}<span>训练积分${earned.kind === 'review' ? ' · 复习' : earned.estimated ? ' · 历史回算' : ' · 新题'}</span></div><p>正确答案：${esc(formatAnswer(question, question.answer, response.choicesOrder))}</p>${correctChoice?.image || correctChoice?.cells ? `<div class="correct-pattern">${choiceContent(question, correctChoice, '正确图形')}</div>` : ''}${question.cells ? `<div class="memory-review"><div><small>原始图案</small>${patternGrid(question, question.cells, { mini: true })}</div>${question.type === 'memory-positions' && Array.isArray(response.answer) ? `<div><small>你的选择</small>${patternGrid(question, response.answer, { mini: true })}</div>` : ''}</div>` : ''}${question.answerImage ? `<details><summary>查看展开后的答案图</summary>${question.answerImageCrop ? croppedImage(question.answerImage, question.answerImageCrop, '展开后的孔位') : imageMarkup(question.answerImage, '展开后的孔位')}</details>` : ''}${(question.curatedExplanation ?? question.explanation) ? `<details><summary>查看解释</summary><p>${esc(question.curatedExplanation ?? (typeof question.explanation === 'string' ? question.explanation : JSON.stringify(question.explanation)))}</p></details>` : ''}<small>${session.version >= 3 ? esc(questionFamilyName(question)) + ' · 同类题目标' : '下题目标'} ${response.levelAfter} / ${MAX_LEVEL} 档</small></div>`;
 }
 
 function questionBody(question, current) {
   const answered = current.answered;
   const response = answered ? session.responses.at(-1) : null;
+  const stem = question.image ? imageMarkup(question.image, '题目图形', question.sourceId === 'mars_ib' || isPrivateMatrixAsset(question.image) ? 'matrix' : '') : '';
+  const matrixOptions = isUnratedMatrix(question) ? imageMarkup(question.matrixOptionsImage, '从左到右，先上排 1–4，再下排 5–8', 'matrix') : '';
   let content = '';
   if (answered) {
-    if (question.image && !question.type.startsWith('memory')) content = imageMarkup(question.image, '题目图形', question.sourceId === 'mars_ib' ? 'matrix' : '');
+    if (!question.type.startsWith('memory')) content = stem + matrixOptions;
     content += feedbackMarkup(question, response);
   } else if (question.type.startsWith('memory')) {
     content = memoryMarkup(question, current);
@@ -265,7 +292,7 @@ function questionBody(question, current) {
   } else if (question.type === 'folding-video') {
     content = `<video class="video-question" controls playsinline preload="metadata" data-question-video aria-label="折叠及打孔动画"><source src="${safeAsset(question.video)}" type="video/mp4"></video><label class="answer-label" for="hole-answer">完全展开后，一共有多少个孔？</label><input id="hole-answer" class="answer-input" type="number" inputmode="numeric" min="0" max="512" step="1" autocomplete="off" value="${esc(current.draft ?? '')}" aria-label="展开后的孔数">`;
   } else {
-    content = (question.image ? imageMarkup(question.image, '题目图形', question.sourceId === 'mars_ib' ? 'matrix' : '') : '') + choiceButtons(question, current.draft, current.choicesOrder);
+    content = stem + matrixOptions + choiceButtons(question, current.draft, current.choicesOrder);
   }
   return `<p class="question-prompt">${esc(question.prompt)}</p>${question.promptNeedsOriginal ? `<div class="original-prompt"><b>原题条件（英文，作答时请一并参考）</b>\n${esc(question.originalPromptEn)}</div>` : ''}${content}`;
 }
@@ -283,12 +310,12 @@ function renderSession() {
   const sectionLeft = Math.max(0, timing.end - elapsed);
   const target = question ? targetLevel(session, question) : 1;
   const subtype = question ? questionFamilyName(question) : '';
-  return `<div class="wrap"><header class="session-header">${logo()}<div class="overall-timer">全程剩余 <b class="timer" data-total-left>${clock(session.totalMs - elapsed)}</b></div><div class="session-actions"><button class="ghost" data-action="users">${esc(currentProfile?.username ?? '')} · 切换用户</button><button class="ghost" data-action="export-current">导出本次</button><button class="ghost" data-action="${paused ? 'unpause' : 'pause'}">${paused ? '继续计时' : '暂停'}</button><button class="ghost" data-action="finish">提前结束</button></div></header><main id="main"><div class="steps">${CATEGORIES.map((c, index) => `<div class="step ${index === session.sectionIndex ? 'active' : index < session.sectionIndex ? 'done' : ''}"><span><b>${c.number}</b>${c.name}</span><span>${index < session.sectionIndex ? '已结束' : duration(sectionTiming(session, index).duration)}</span></div>`).join('')}</div><div class="practice-layout"><section class="question-card">${paused ? `<div class="pause-surface"><span class="category-icon">${icons.pause}</span><h1>休息一下，进度已保存</h1><p>暂停期间不计入练习用时。<br>准备好了，就从刚才的地方继续。</p><button class="primary" data-action="unpause">继续练习 ${arrow}</button><div style="margin-top:12px"><button class="ghost" data-action="home">返回首页</button></div></div>` : question ? `<div class="question-heading"><div><h1>${currentCategory.name}</h1><div class="question-id">${esc(modeName(session))} · ${esc(subtype)}</div></div><span class="level-badge">练习 ${presentedLevel(session, question)} / ${MAX_LEVEL} 档 · 答对 ${levelPoints(presentedLevel(session, question))}分</span></div><div class="question-body" id="question-body">${questionBody(question, current)}</div><div class="question-actions"><button class="ghost" data-action="skip" ${current.answered ? 'disabled' : ''}>跳过这道题</button><span class="shortcut-hint">${question.choices ? `可按 A–${String.fromCharCode(64 + question.choices.length)} 选择，Enter 提交` : 'Enter 提交答案'}</span><button class="primary" data-action="${current.answered ? 'next' : 'submit'}" id="submit-button">${current.answered ? `下一题 ${arrow}` : '提交答案'}</button></div>` : `<div class="exhausted-card"><span class="category-icon">${icons[currentCategory.id]}</span><h1>这类新题，已练完了。</h1><p>已见题不会自动重复。可以开启本段复习，或等待倒计时进入下一段。</p><button class="primary" data-action="review-section">复习本类题目 ${arrow}</button></div>`}</section><aside class="practice-side"><div class="timer-card"><div class="timer-label">${currentCategory.name} · 本段剩余</div><div class="timer" data-section-left>${clock(sectionLeft)}</div><div class="track"><span data-section-progress style="width:${Math.max(0, sectionLeft / timing.duration * 100)}%"></span></div><p class="quiet">时间到后自动进入${CATEGORIES[session.sectionIndex + 1]?.name ?? '练习总结'}</p></div><div class="side-card"><h3>本次训练积分</h3><div class="live-points"><b>${number(info.points)}</b><small>本段 ${sectionInfo.points}分</small></div><h3>本段作答</h3><div class="side-counts"><div><b class="good num">${sectionInfo.correct}</b><small>答对</small></div><div><b class="bad num">${sectionInfo.incorrect}</b><small>答错</small></div><div><b class="num">${sectionInfo.skipped}</b><small>跳过</small></div></div></div><div class="side-card"><h3>${question ? `同类题目标 ${target} / ${MAX_LEVEL}` : '个人难度已保存'}</h3>${question ? `<div class="level-ladder">${Array.from({ length: MAX_LEVEL }, (_, i) => `<span class="${i < target ? 'on' : ''}"></span>`).join('')}</div>` : ''}<p>${question ? session.version >= 3 ? esc(subtype) + '独立升降档。' : '答对升一档，答错降一档。' : '各小题型的档位分别保存，复习时继续沿用。'}<br>档位为练习估算，原始难度信息保留在逐题记录中。</p></div></aside></div></main>${footer()}</div>`;
+  return `<div class="wrap"><header class="session-header">${logo()}<div class="overall-timer">全程剩余 <b class="timer" data-total-left>${clock(session.totalMs - elapsed)}</b></div><div class="session-actions"><button class="ghost" data-action="users">${esc(currentProfile?.username ?? '')} · 切换用户</button><button class="ghost" data-action="export-current">导出本次</button><button class="ghost" data-action="${paused ? 'unpause' : 'pause'}">${paused ? '继续计时' : '暂停'}</button><button class="ghost" data-action="finish">提前结束</button></div></header><main id="main"><div class="steps">${CATEGORIES.map((c, index) => `<div class="step ${index === session.sectionIndex ? 'active' : index < session.sectionIndex ? 'done' : ''}"><span><b>${c.number}</b>${c.name}</span><span>${index < session.sectionIndex ? '已结束' : duration(sectionTiming(session, index).duration)}</span></div>`).join('')}</div><div class="practice-layout"><section class="question-card">${paused ? `<div class="pause-surface"><span class="category-icon">${icons.pause}</span><h1>休息一下，进度已保存</h1><p>暂停期间不计入练习用时。<br>准备好了，就从刚才的地方继续。</p><button class="primary" data-action="unpause">继续练习 ${arrow}</button><div style="margin-top:12px"><button class="ghost" data-action="home">返回首页</button></div></div>` : question ? `<div class="question-heading"><div><h1>${currentCategory.name}</h1><div class="question-id">${esc(modeName(session))} · ${esc(subtype)}</div></div><span class="level-badge">${isUnratedMatrix(question) ? '未分档 · 单独统计' : isMatrixVariant(question) ? '4 档变式 · 复习积分' : `练习 ${presentedLevel(session, question)} / ${MAX_LEVEL} 档 · 答对 ${levelPoints(presentedLevel(session, question))}分`}</span></div><div class="question-body" id="question-body">${questionBody(question, current)}</div><div class="question-actions"><button class="ghost" data-action="skip" ${current.answered ? 'disabled' : ''}>跳过这道题</button><span class="shortcut-hint">${isUnratedMatrix(question) ? '可按 1–8 选择，Enter 提交' : question.choices ? `可按 A–${String.fromCharCode(64 + question.choices.length)} 选择，Enter 提交` : 'Enter 提交答案'}</span><button class="primary" data-action="${current.answered ? 'next' : 'submit'}" id="submit-button">${current.answered ? `下一题 ${arrow}` : '提交答案'}</button></div>` : `<div class="exhausted-card"><span class="category-icon">${icons[currentCategory.id]}</span><h1>这类新题，已练完了。</h1><p>已见题不会自动重复。可以开启本段复习，或等待倒计时进入下一段。</p><button class="primary" data-action="review-section">复习本类题目 ${arrow}</button></div>`}</section><aside class="practice-side"><div class="timer-card"><div class="timer-label">${currentCategory.name} · 本段剩余</div><div class="timer" data-section-left>${clock(sectionLeft)}</div><div class="track"><span data-section-progress style="width:${Math.max(0, sectionLeft / timing.duration * 100)}%"></span></div><p class="quiet">时间到后自动进入${CATEGORIES[session.sectionIndex + 1]?.name ?? '练习总结'}</p></div><div class="side-card"><h3>本次训练积分</h3><div class="live-points"><b>${number(info.points)}</b><small>本段 ${sectionInfo.points}分</small></div><h3>本段作答</h3><div class="side-counts"><div><b class="good num">${sectionInfo.correct}</b><small>答对</small></div><div><b class="bad num">${sectionInfo.incorrect}</b><small>答错</small></div><div><b class="num">${sectionInfo.skipped}</b><small>跳过</small></div></div>${currentCategory.id === 'figure' ? sandiaStats(info) : ''}</div><div class="side-card"><h3>${isUnratedMatrix(question) ? 'Sandia 单独统计' : isMatrixVariant(question) ? '第 4 档变式' : question ? `同类题目标 ${target} / ${MAX_LEVEL}` : '个人难度已保存'}</h3>${question && !isUnratedMatrix(question) && !isMatrixVariant(question) ? `<div class="level-ladder">${Array.from({ length: MAX_LEVEL }, (_, i) => `<span class="${i < target ? 'on' : ''}"></span>`).join('')}</div>` : ''}<p>${question ? session.version >= 3 ? isUnratedMatrix(question) || isMatrixVariant(question) ? '本题不改变主练档位。' : esc(subtype) + '独立升降档。' : '答对升一档，答错降一档。' : '各小题型的档位分别保存，复习时继续沿用。'}<br>档位为练习估算，原始难度信息保留在逐题记录中。</p></div></aside></div></main>${footer()}</div>`;
 }
 
 function resultMarkup(record, isResult = false) {
   const info = summarize(record);
-  return `<div class="${isResult ? 'result-heading' : 'page-heading'}"><div><div class="eyebrow">${isResult ? '每一题，都有记录' : '逐题回看'}</div><h1>${isResult ? '这次练习，已记录。' : dateLabel(record.startedAt)}</h1><p>${isResult ? `${dateLabel(record.startedAt)}开始 · ` : ''}计划 ${record.totalMs / 60000} 分钟，实际 ${duration(info.elapsedMs)} · ${statusText(record.status)}</p><p class="quiet">${esc(record.username ?? '未归属记录')} · ${esc(modeName(record))} · ${record.version === 1 ? '旧版均分计时' : '模拟训练配比 20∶10∶15∶15 · 记忆材料每次展示 1 秒'}</p></div>${!isResult ? `<div class="button-row"><button class="secondary" data-action="export-one" data-id="${esc(record.id)}">导出本次</button><button class="ghost" data-action="delete-record" data-id="${esc(record.id)}">删除记录</button></div>` : ''}</div><div class="stats four-stats"><div class="stat"><div class="stat-label">本次训练积分</div><div class="stat-value">${number(info.points)}<small>分</small></div><div class="stat-note">新题 ${info.newPoints} · 复习 ${info.reviewPoints}${info.hasEstimated ? ` · 回算 ${info.legacyPoints}` : ''}</div></div><div class="stat"><div class="stat-label">答对</div><div class="stat-value" style="color:var(--green)">${info.correct}<small>道</small></div></div><div class="stat"><div class="stat-label">答错</div><div class="stat-value" style="color:var(--red)">${info.incorrect}<small>道</small></div></div><div class="stat"><div class="stat-label">有效作答正确率</div><div class="stat-value">${info.accuracy === null ? '—' : Math.round(info.accuracy * 100)}<small>${info.accuracy === null ? '' : '%'}</small></div></div></div>${scoringNotice(info)}<div class="result-sections">${info.sections.map((section) => `<article class="result-section"><span class="category-icon">${icons[section.id]}</span><h3 style="margin-top:12px">${section.name}</h3><div class="result-numbers">${section.timeMs === 0 && section.correct + section.incorrect + section.skipped + section.unanswered === 0 ? '—' : number(section.points)}<small>${section.timeMs === 0 && section.correct + section.incorrect + section.skipped + section.unanswered === 0 ? '尚未练习' : '训练积分'}</small></div><div class="quiet">${section.correct} 对 / ${section.incorrect} 错</div><p>实际 ${duration(section.timeMs)} / 计划 ${duration(section.plannedMs)}${record.version < 3 ? ` · 最后目标 ${section.finalLevel} 档` : ''}</p>${record.version >= 3 ? `<div class="family-levels">${section.families.map((family) => `<span>${esc(family.name)} ${family.level}档</span>`).join('')}</div>` : ''}<div class="quiet">${section.skipped} 跳过 · ${section.unanswered} 未答</div></article>`).join('')}</div>${familyScoresMarkup(record)}`;
+  return `<div class="${isResult ? 'result-heading' : 'page-heading'}"><div><div class="eyebrow">${isResult ? '每一题，都有记录' : '逐题回看'}</div><h1>${isResult ? '这次练习，已记录。' : dateLabel(record.startedAt)}</h1><p>${isResult ? `${dateLabel(record.startedAt)}开始 · ` : ''}计划 ${record.totalMs / 60000} 分钟，实际 ${duration(info.elapsedMs)} · ${statusText(record.status)}</p><p class="quiet">${esc(record.username ?? '未归属记录')} · ${esc(modeName(record))} · ${record.version === 1 ? '旧版均分计时' : '模拟训练配比 20∶10∶15∶15 · 记忆材料每次展示 1 秒'}</p></div>${!isResult ? `<div class="button-row"><button class="secondary" data-action="export-one" data-id="${esc(record.id)}">导出本次</button><button class="ghost" data-action="delete-record" data-id="${esc(record.id)}">删除记录</button></div>` : ''}</div><div class="stats four-stats"><div class="stat"><div class="stat-label">本次训练积分</div><div class="stat-value">${number(info.points)}<small>分</small></div><div class="stat-note">新题 ${info.newPoints} · 复习 ${info.reviewPoints}${info.hasEstimated ? ` · 回算 ${info.legacyPoints}` : ''}</div></div><div class="stat"><div class="stat-label">答对</div><div class="stat-value" style="color:var(--green)">${info.correct}<small>道</small></div></div><div class="stat"><div class="stat-label">答错</div><div class="stat-value" style="color:var(--red)">${info.incorrect}<small>道</small></div></div><div class="stat"><div class="stat-label">有效作答正确率</div><div class="stat-value">${info.accuracy === null ? '—' : Math.round(info.accuracy * 100)}<small>${info.accuracy === null ? '' : '%'}</small></div></div></div>${scoringNotice(info)}${sandiaStats(info)}<div class="result-sections">${info.sections.map((section) => `<article class="result-section"><span class="category-icon">${icons[section.id]}</span><h3 style="margin-top:12px">${section.name}</h3><div class="result-numbers">${section.timeMs === 0 && section.correct + section.incorrect + section.skipped + section.unanswered === 0 ? '—' : number(section.points)}<small>${section.timeMs === 0 && section.correct + section.incorrect + section.skipped + section.unanswered === 0 ? '尚未练习' : '训练积分'}</small></div><div class="quiet">${section.correct} 对 / ${section.incorrect} 错</div><p>实际 ${duration(section.timeMs)} / 计划 ${duration(section.plannedMs)}${record.version < 3 ? ` · 最后目标 ${section.finalLevel} 档` : ''}</p>${record.version >= 3 ? `<div class="family-levels">${section.families.map((family) => `<span>${esc(family.name)} ${family.level}档</span>`).join('')}</div>` : ''}<div class="quiet">${section.skipped} 跳过 · ${section.unanswered} 未答</div></article>`).join('')}</div>${familyScoresMarkup(record)}`;
 }
 function results() {
   const record = visibleRecords().find((s) => s.id === selectedSessionId) ?? session;
@@ -299,7 +326,9 @@ function reviewRecord(record, index, parent) {
   const question = getQuestion(record, parent);
   const q = question ?? { id: record.questionId, type: record.type, prompt: '此题不在当前题库版本中，原作答记录仍保留。' };
   let media = '';
-  if (q.image) media += imageMarkup(q.image, '原题图形', q.sourceId === 'mars_ib' ? 'matrix' : '');
+  if (q.image) media += imageMarkup(q.image, '原题图形', q.sourceId === 'mars_ib' || isPrivateMatrixAsset(q.image) ? 'matrix' : '');
+  if (isUnratedMatrix(q)) media += imageMarkup(q.matrixOptionsImage, '原题选项图', 'matrix');
+  if (isPrivateMatrixAsset(q.image) && !safeAsset(q.image)) media = '<p class="quiet">这道题的图形需在原浏览器查看，或先在此浏览器导入同一个题包。</p>';
   if (q.probeImage) media += `<p class="quiet">探测图</p>${imageMarkup(q.probeImage, '探测图')}`;
   if (q.video) media += `<video class="video-question" controls playsinline preload="none" src="${safeAsset(q.video)}" aria-label="原折纸动画"></video>`;
   if (q.answerImage) media += q.answerImageCrop ? `<div class="answer-paper">${croppedImage(q.answerImage, q.answerImageCrop, '展开后的答案图')}</div>` : imageMarkup(q.answerImage, '展开后的答案图');
@@ -308,7 +337,7 @@ function reviewRecord(record, index, parent) {
   if (q.choices?.some((c) => c.image || c.cells)) media += `<div class="choices image-choices ${['folding-choice', 'memory-recognition'].includes(q.type) ? 'large-choices' : ''}">${(record.choicesOrder?.length ? record.choicesOrder : q.choices.map((c) => c.id)).map((id, i) => { const choice = q.choices.find((c) => c.id === id); return choice ? `<div class="choice ${choice.id === record.answer ? 'selected' : ''}"><span class="choice-tag">${String.fromCharCode(65 + i)}</span>${choiceContent(q, choice, `选项${String.fromCharCode(65 + i)}`)}</div>` : ''; }).join('')}</div>`;
   const score = recordScore(parent, record);
   const explanation = q.curatedExplanation ?? (typeof q.explanation === 'string' ? q.explanation : '');
-  return `<details class="record-detail"><summary class="record-summary"><span class="summary-main"><span class="status-dot ${record.status}"></span><b>${String(index + 1).padStart(2, '0')}</b><span>${category(record.category).short} · ${statusText(record.status)}</span><span class="quiet">${record.presentedLevel}档 · ${score.points}分${score.estimated ? '（回算）' : score.kind === 'review' ? '（复习）' : ''} · ${duration(record.timeMs)}</span><span class="question-code">${esc(record.questionId)}</span></span><span class="quiet">展开 ↓</span></summary><div class="record-review"><p class="question-prompt">${esc(q.prompt)}</p>${q.promptNeedsOriginal ? `<div class="original-prompt">${esc(q.originalPromptEn)}</div>` : ''}${media}<div class="answer-comparison"><div><small>你的答案</small>${esc(formatAnswer(q, record.answer, record.choicesOrder))}</div><div><small>正确答案</small>${question ? esc(formatAnswer(q, q.answer, record.choicesOrder)) : '请参考原题库'}</div></div>${explanation ? `<p class="review-explanation">${esc(explanation)}</p>` : ''}<p class="quiet" style="margin-top:15px">来源：${esc(sourceName(record.sourceId))}<br>原始难度：${esc(q.originalDifficulty?.label_zh ?? '未提供')}<br>${esc(q.familyLevelBasis ?? q.levelBasis ?? '练习估算')}<br>目标档位 ${record.levelBefore} → ${record.levelAfter}<br>本题训练积分 ${score.points} / 可得 ${score.possible}分${score.estimated ? '（历史回算）' : '（当时规则）'}</p></div></details>`;
+  return `<details class="record-detail"><summary class="record-summary"><span class="summary-main"><span class="status-dot ${record.status}"></span><b>${String(index + 1).padStart(2, '0')}</b><span>${category(record.category).short} · ${statusText(record.status)}</span><span class="quiet">${isUnratedMatrix(record) ? 'Sandia · 单列' : `${record.presentedLevel}档 · ${score.points}分${score.estimated ? '（回算）' : score.kind === 'review' ? '（复习）' : ''}`} · ${duration(record.timeMs)}</span><span class="question-code">${esc(record.questionId)}</span></span><span class="quiet">展开 ↓</span></summary><div class="record-review"><p class="question-prompt">${esc(q.prompt)}</p>${q.promptNeedsOriginal ? `<div class="original-prompt">${esc(q.originalPromptEn)}</div>` : ''}${media}<div class="answer-comparison"><div><small>你的答案</small>${esc(formatAnswer(q, record.answer, record.choicesOrder))}</div><div><small>正确答案</small>${question ? esc(formatAnswer(q, q.answer, record.choicesOrder)) : '请参考原题库'}</div></div>${explanation ? `<p class="review-explanation">${esc(explanation)}</p>` : ''}<p class="quiet" style="margin-top:15px">来源：${esc(sourceName(record.sourceId))}<br>原始难度：${esc(q.originalDifficulty?.label_zh ?? '未提供')}<br>${esc(q.familyLevelBasis ?? q.levelBasis ?? '练习估算')}<br>${isUnratedMatrix(record) ? '未分档，不计训练积分。' : `目标档位 ${record.levelBefore} → ${record.levelAfter}<br>本题训练积分 ${score.points} / 可得 ${score.possible}分${score.estimated ? '（历史回算）' : '（当时规则）'}`}</p></div></details>`;
 }
 function detail() {
   const record = visibleRecords().find((s) => s.id === selectedSessionId);
@@ -349,6 +378,29 @@ async function reloadLocalData() {
   sessions = allSessions.filter((s)=>s.userId===currentProfile?.id && s.userId);
   for (const id of Object.keys(exposures)) delete exposures[id];
   for (const s of sessions) for (const r of s.responses) exposures[r.questionId] = (exposures[r.questionId] ?? 0)+1;
+  await refreshMatrixPack();
+}
+async function refreshMatrixPack() {
+  const owner = currentProfile?.id;
+  if (matrixOwner !== owner) {
+    for (const url of matrixUrls.values()) URL.revokeObjectURL(url);
+    matrixUrls.clear();
+    matrixOwner = owner; localMatrixPack = null; matrixQuestions = []; matrixStandaloneSeen = new Set();
+  }
+  if (!owner) return;
+  try {
+    matrixStore ??= await openMatrixStore();
+    const pack = localMatrixPack ?? await matrixStore.pack(owner);
+    const records = pack ? await matrixStore.answers(owner, pack.id) : [];
+    if (currentProfile?.id !== owner) return;
+    if (pack && !localMatrixPack) {
+      localMatrixPack = pack;
+      matrixQuestions = northMatrixQuestions(pack);
+    }
+    matrixStandaloneSeen = new Set(records.map((record) => record.questionId));
+  } catch {
+    // A missing or unavailable local pack must not prevent ordinary practice.
+  }
 }
 function persist(force = true) {
   if (!session || !store) return;
@@ -370,6 +422,7 @@ function nextQuestion() {
   const pool = north ? practiceBank.categories[id] : bank.categories[id];
   let question;
   if (north && id === 'memory') question = selectUserMemory(session, currentProfile);
+  else if (north && id === 'figure') question = selectNorthFigure(pool, matrixQuestions, session, currentProfile, matrixStandaloneSeen);
   else question = selectUserQuestion(pool, session, currentProfile);
   if (!question && id === 'memory' && !north) {
     const seen = new Set(currentProfile.memoryPatterns);
@@ -501,11 +554,15 @@ const actions = {
   reload: () => location.reload(),
   mode: (element) => { if (!['north', 'extended'].includes(element.dataset.value)) return; practiceMode = element.dataset.value; savePrefs(); render(); },
   duration: (element) => { minutes = Number(element.dataset.value); savePrefs(); render(); },
-  start: async () => {
+  start: async (button) => {
     if (!bank || !practiceBank || !store || !currentProfile || activeCandidate()) return;
     const input = document.querySelector('#minutes');
     const value = input ? Number(input.value) : minutes;
     if (!Number.isInteger(value) || value < 4 || value > 180) return toast('请输入 4–180 之间的整数分钟数。');
+    const owner = currentProfile.id;
+    button.disabled = true;
+    await refreshMatrixPack();
+    if (currentProfile?.id !== owner || route !== 'home' || activeCandidate()) return;
     minutes = value; savePrefs();
     session = createUserSession(currentProfile, minutes, practiceMode);
     route = 'practice'; nextQuestion();
@@ -514,6 +571,8 @@ const actions = {
   resume: (element) => {
     const found = sessions.find((s) => s.id === element.dataset.id);
     if (!found || !bank || !practiceBank) return;
+    const currentQuestion = getQuestion(found.current, found);
+    if (!found.current?.answered && isPrivateMatrixAsset(currentQuestion?.image) && !safeAsset(currentQuestion.image)) return toast('当前题需要本地矩阵题包，请先导入题包再继续。');
     session = resumeSession({ ...structuredClone(found), status: 'paused', anchorAt: null });
     route = 'practice';
     if (!session.current) return nextQuestion();
@@ -619,9 +678,10 @@ document.addEventListener('keydown', (event) => {
   if (route !== 'practice' || session?.status !== 'running' || modal.open || ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName)) return;
   const key = event.key.toLowerCase();
   const q = getQuestion();
+  if (!q || !session.current) return;
   if (key === 'enter') { event.preventDefault(); session.current.answered ? nextQuestion() : answer(); }
-  else if (/^[a-d]$/.test(key) && q?.choices && !session.current.answered && (!q.type.startsWith('memory') || memoryStage(q, session.current).phase === 'answer')) {
-    const id = session.current.choicesOrder[key.charCodeAt(0) - 97];
+  else if ((isUnratedMatrix(q) ? /^[1-8]$/ : /^[a-d]$/).test(key) && q.choices && !session.current.answered && (!q.type.startsWith('memory') || memoryStage(q, session.current).phase === 'answer')) {
+    const id = session.current.choicesOrder[isUnratedMatrix(q) ? Number(key) - 1 : key.charCodeAt(0) - 97];
     if (id) { session.current.draft = id; render(); }
   }
 });

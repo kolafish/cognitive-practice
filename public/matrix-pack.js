@@ -4,6 +4,26 @@ export const MATRIX_SECTIONS = {
   sandia: { name: 'Sandia 矩阵', note: '八选一，按原题顺序作答。独立记录，暂无练习档位。' },
 };
 
+export const matrixAssetPath = (packId, key) => `private-matrix/${packId}/${key}.png`;
+
+export function northMatrixQuestions(pack) {
+  return pack.questions.map((item) => {
+    const variant = item.kind === 'mars-variant';
+    const path = (key) => matrixAssetPath(pack.id, key);
+    const choices = variant ? item.options.map((key, i) => ({ id: String(i + 1), image: path(key) }))
+      : Array.from({ length: 8 }, (_, i) => ({ id: String(i + 1), text: String(i + 1) }));
+    return {
+      id: `local-matrix-${item.id}`, matrixItemId: item.id, category: 'figure', type: 'choice',
+      sourceId: variant ? 'local-mars-variant' : 'local-sandia', taskFamily: variant ? 'matrix-variant' : 'sandia-matrix',
+      level: variant ? 4 : null, image: path(item.image), choices, answer: String(item.answer + 1),
+      prompt: variant ? '观察图形规律，选出能补全矩阵的一项。'
+        : '选出能补全矩阵的一项。选项图从左到右，先上排 1–4，再下排 5–8。',
+      ...(variant ? { familyLevel: 4, matrixVariantOf: item.variantOf, familyLevelBasis: '沿用 MaRs-IB 母题的结构档位。' }
+        : { choicesEmbedded: true, matrixOptionsImage: path(item.optionsImage), levelBasis: '未分档，单独统计。' }),
+    };
+  });
+}
+
 export function parseMatrixPack(text) {
   if (text.length > MAX_MATRIX_PACK_BYTES) throw new Error('请选择 8 MB 以内的题包。');
   const invalid = () => { throw new Error('这不是有效的矩阵题包，请选择收到的 JSON 文件。'); };

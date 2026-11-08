@@ -4,11 +4,16 @@ export const MODES = { north: '北中主练', extended: '拓展练习', legacy: 
 export const FAMILY_NAMES = {
   'visual-positions': '位置记忆', 'visual-recognition': '图案辨认', 'visual-symmetry': '对称判断',
   'matrix-choice': '图形矩阵选择', 'matrix-construction': '矩阵构图',
+  'matrix-variant': 'MaRs-IB 第 4 档变式', 'sandia-matrix': 'Sandia 八选一',
   'folding-static': '折纸孔位', 'folding-animation': '动画孔位', 'folding-count': '动画孔数',
   'verbal-order': '条件排序', 'verbal-analogy': '词语关系',
   'memory-sequence-grid': '位置序列', 'memory-sequence-digits': '数字序列',
   'memory-letter-binding': '字母位置绑定',
 };
+
+export const isMatrixVariant = (q) => q?.sourceId === 'local-mars-variant';
+export const isUnratedMatrix = (q) => q?.sourceId === 'local-sandia';
+export const isPrivateMatrixAsset = (path) => typeof path === 'string' && /^private-matrix\/[a-z0-9-]{1,80}\/[a-z0-9-]{1,80}\.png$/.test(path);
 
 export function taskFamily(question) {
   if (typeof question.taskFamily === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9:_-]{0,99}$/.test(question.taskFamily) && !['constructor', 'prototype'].includes(question.taskFamily)) return question.taskFamily;
@@ -32,12 +37,15 @@ export function familyName(family) {
 }
 
 export function targetLevel(session, questionOrFamily) {
+  if (isUnratedMatrix(questionOrFamily)) return null;
+  if (isMatrixVariant(questionOrFamily)) return 4;
   const family = typeof questionOrFamily === 'string' ? questionOrFamily : taskFamily(questionOrFamily);
   if (session.version >= 3) return session.familyLevels?.[family] ?? 1;
   return session.levels[questionOrFamily.category];
 }
 
 export function presentedLevel(session, question) {
+  if (isUnratedMatrix(question)) return null;
   return session.version >= 3 ? question.familyLevel ?? question.level : question.level;
 }
 
@@ -161,13 +169,24 @@ export function validStoredQuestion(question) {
   if (validVisualMemory(question)) return true;
   if (!question || !['figure', 'memory', 'spatial', 'verbal'].includes(question.category)) return false;
   if (typeof question.id !== 'string' || question.id.length > 200 || typeof question.sourceId !== 'string' || question.sourceId.length > 200) return false;
-  if (typeof question.prompt !== 'string' || question.prompt.length > 20000 || !Number.isInteger(question.level) || question.level < 1 || question.level > 8) return false;
+  const variant = isMatrixVariant(question), unrated = isUnratedMatrix(question);
+  if (typeof question.prompt !== 'string' || question.prompt.length > 20000 || (!unrated && (!Number.isInteger(question.level) || question.level < 1 || question.level > 8))) return false;
   if (question.familyLevel !== undefined && (!Number.isInteger(question.familyLevel) || question.familyLevel < 1 || question.familyLevel > 8)) return false;
-  const asset = (path) => path === undefined || typeof path === 'string' && /^assets\/bank\/[a-f0-9]+\.(png|jpg|jpeg|svg|mp4)$/.test(path);
+  const asset = (path) => path === undefined || (variant || unrated ? isPrivateMatrixAsset(path) : typeof path === 'string' && /^assets\/bank\/[a-f0-9]+\.(png|jpg|jpeg|svg|mp4)$/.test(path));
   const crop = (value) => value === undefined || value && ['x', 'y', 'width', 'height', 'sourceWidth', 'sourceHeight'].every((key) => Number.isFinite(value[key]) && value[key] >= 0 && value[key] <= 20000) && value.width > 0 && value.height > 0 && value.x + value.width <= value.sourceWidth && value.y + value.height <= value.sourceHeight;
   if (!['image', 'probeImage', 'video', 'answerImage'].every((key) => asset(question[key])) || !crop(question.answerImageCrop)) return false;
   const option = (choice) => choice && typeof choice.id === 'string' && choice.id.length < 200 && (choice.text === undefined || typeof choice.text === 'string' && choice.text.length < 10000) && asset(choice.image) && crop(choice.imageCrop);
   if (question.choices !== undefined && (!Array.isArray(question.choices) || question.choices.length > 20 || !question.choices.every(option))) return false;
+  if (variant || unrated) {
+    const matrixId = /^[a-z0-9][a-z0-9-]{0,79}$/;
+    if (question.category !== 'figure' || question.type !== 'choice' || !matrixId.test(question.matrixItemId ?? '') || question.id !== `local-matrix-${question.matrixItemId}`
+        || !isPrivateMatrixAsset(question.image) || question.choices?.length !== (variant ? 4 : 8)
+        || !question.choices.every((c, i) => c.id === String(i + 1))) return false;
+    if (variant && (question.taskFamily !== 'matrix-variant' || question.level !== 4 || question.familyLevel !== 4
+        || !matrixId.test(question.matrixVariantOf ?? '') || !question.choices.every((c) => isPrivateMatrixAsset(c.image)))) return false;
+    if (unrated && (question.taskFamily !== 'sandia-matrix' || question.level !== null || question.familyLevel !== undefined
+        || question.choicesEmbedded !== true || !isPrivateMatrixAsset(question.matrixOptionsImage))) return false;
+  }
   if (['choice', 'folding-choice', 'memory-binding'].includes(question.type)) return question.choices?.some((choice) => choice.id === question.answer) === true;
   if (question.type === 'folding-video') return Number.isInteger(question.answer) && question.answer >= 0 && question.answer <= 512;
   if (question.type === 'construction') return Array.isArray(question.elements) && question.elements.length <= 24 && question.elements.every(option) && Array.isArray(question.answer) && question.answer.every((id) => question.elements.some((choice) => choice.id === id));

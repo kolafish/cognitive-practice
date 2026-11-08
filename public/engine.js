@@ -1,5 +1,5 @@
 import { SCORE_RULE_VERSION, scoreFields, validScoreFields, scoreSummary } from './scoring.js';
-import { taskFamily, targetLevel, presentedLevel, validVisualMemory, validStoredQuestion, familyName, chooseFamily } from './practice.js';
+import { taskFamily, targetLevel, presentedLevel, validVisualMemory, validStoredQuestion, familyName, chooseFamily, isMatrixVariant, isUnratedMatrix } from './practice.js';
 
 export const CATEGORIES = [
   { id: 'figure', name: '图形规律', short: '图形', number: '01', description: '观察变化，发现图形之间的规律。' },
@@ -107,7 +107,7 @@ function unanswered(session, atElapsed, now, reason) {
     timeMs: Math.max(0, atElapsed - current.askedAtElapsed),
     generatedQuestion: current.generatedQuestion ?? null,
     ...(session.version >= 3 ? { questionSnapshot: current.questionSnapshot ?? null } : {}),
-    ...(session.scoreRuleVersion === SCORE_RULE_VERSION ? scoreFields(current.presentedLevel, 'unanswered', current.scorePracticeKind ?? (session.reviewCategories?.includes(current.category) ? 'review' : 'new')) : {}),
+    ...(session.scoreRuleVersion === SCORE_RULE_VERSION && !isUnratedMatrix(current) ? scoreFields(current.presentedLevel, 'unanswered', current.scorePracticeKind ?? (session.reviewCategories?.includes(current.category) ? 'review' : 'new')) : {}),
   });
 }
 
@@ -208,7 +208,7 @@ export function beginQuestion(session, question, now = Date.now(), random = Math
   if (next.current && !next.current.answered) throw new Error('请先完成当前题目。');
   const choices = question.choices ?? [];
   const order = question.choicesEmbedded ? choices.map((c) => c.id) : shuffle(choices.map((c) => c.id), random);
-  if (next.version >= 3) next.familyLevels[taskFamily(question)] ??= 1;
+  if (next.version >= 3 && !isUnratedMatrix(question) && !isMatrixVariant(question)) next.familyLevels[taskFamily(question)] ??= 1;
   next.current = { questionId: question.id, category: question.category, type: question.type,
     sourceId: question.sourceId, groupId: question.groupId ?? null,
     ...(next.version >= 3 ? { taskFamily: taskFamily(question) } : {}),
@@ -216,8 +216,8 @@ export function beginQuestion(session, question, now = Date.now(), random = Math
     choicesOrder: order, draft: null, presentationAtElapsed: null,
     generatedQuestion: question.generated ? question : null };
   if (next.version >= 3) next.current.questionSnapshot = question.generated ? null : copy(question);
-  if (next.scoreRuleVersion === SCORE_RULE_VERSION) {
-    const { scoreMaxPoints, scorePracticeKind } = scoreFields(next.current.presentedLevel, null, next.reviewCategories?.includes(question.category) ? 'review' : 'new');
+  if (next.scoreRuleVersion === SCORE_RULE_VERSION && !isUnratedMatrix(question)) {
+    const { scoreMaxPoints, scorePracticeKind } = scoreFields(next.current.presentedLevel, null, isMatrixVariant(question) || next.reviewCategories?.includes(question.category) ? 'review' : 'new');
     Object.assign(next.current, { scoreMaxPoints, scorePracticeKind });
   }
   return next;
@@ -248,7 +248,8 @@ export function submitAnswer(session, question, answer, now = Date.now(), skippe
   if (!skipped && ['memory-positions', 'memory-recognition', 'memory-symmetry'].includes(question.type) && memoryStage(next, question, next.current, now).phase !== 'answer') return { session: next, rejected: true };
   const correct = !skipped && gradeAnswer(question, answer);
   const before = targetLevel(next, question);
-  const after = clamp(before + (correct ? 1 : -1), 1, MAX_LEVEL);
+  const adapts = !isUnratedMatrix(question) && !isMatrixVariant(question);
+  const after = adapts ? clamp(before + (correct ? 1 : -1), 1, MAX_LEVEL) : before;
   const response = {
     questionId: question.id, category: question.category, type: question.type,
     sourceId: question.sourceId, groupId: question.groupId ?? null,
@@ -260,21 +261,27 @@ export function submitAnswer(session, question, answer, now = Date.now(), skippe
     timeMs: Math.max(0, next.elapsedMs - next.current.askedAtElapsed),
     generatedQuestion: question.generated ? question : null,
     ...(next.version >= 3 ? { questionSnapshot: question.generated ? null : copy(question) } : {}),
-    ...(next.scoreRuleVersion === SCORE_RULE_VERSION ? scoreFields(presentedLevel(next, question), skipped ? 'skipped' : correct ? 'correct' : 'incorrect', next.current.scorePracticeKind ?? (next.reviewCategories?.includes(question.category) ? 'review' : 'new')) : {}),
+    ...(next.scoreRuleVersion === SCORE_RULE_VERSION && !isUnratedMatrix(question) ? scoreFields(presentedLevel(next, question), skipped ? 'skipped' : correct ? 'correct' : 'incorrect', next.current.scorePracticeKind ?? (next.reviewCategories?.includes(question.category) ? 'review' : 'new')) : {}),
   };
   next.responses.push(response);
   next.current.answered = true;
-  next.levels[question.category] = after;
-  if (next.version >= 3) next.familyLevels[taskFamily(question)] = after;
+  if (adapts) {
+    next.levels[question.category] = after;
+    if (next.version >= 3) next.familyLevels[taskFamily(question)] = after;
+  }
   next.updatedAt = now;
   return { session: next, response, rejected: false };
 }
 
 export function summarize(session, now = Date.now()) {
   const elapsed = elapsedTime(session, now);
+  const unranked = session.responses.filter(isUnratedMatrix);
+  const unrated = unranked.length ? { correct: unranked.filter((r) => r.status === 'correct').length,
+    incorrect: unranked.filter((r) => r.status === 'incorrect').length, skipped: unranked.filter((r) => r.status === 'skipped').length,
+    unanswered: unranked.filter((r) => r.status === 'unanswered').length, timeMs: unranked.reduce((sum, r) => sum + r.timeMs, 0) } : null;
   const sections = CATEGORIES.map((category, index) => {
     const timing = sectionTiming(session, index);
-    const responses = session.responses.filter((r) => r.category === category.id);
+    const responses = session.responses.filter((r) => r.category === category.id && !isUnratedMatrix(r));
     const correct = responses.filter((r) => r.status === 'correct').length;
     const incorrect = responses.filter((r) => r.status === 'incorrect').length;
     return { ...category, correct, incorrect, ...scoreSummary(session, responses),
@@ -283,11 +290,11 @@ export function summarize(session, now = Date.now()) {
       attempted: correct + incorrect,
       timeMs: clamp(elapsed - timing.start, 0, timing.duration), plannedMs: timing.duration,
       finalLevel: session.levels[category.id],
-      families: [...new Set([...responses.map((r) => r.taskFamily).filter(Boolean), ...(session.current?.category === category.id && session.current.taskFamily ? [session.current.taskFamily] : [])])].map((family) => ({ id: family, name: familyName(family), level: session.familyLevels?.[family] ?? 1 })),
+      families: [...new Set([...responses.filter((r) => !isMatrixVariant(r)).map((r) => r.taskFamily).filter(Boolean), ...(session.current?.category === category.id && session.current.taskFamily && !isMatrixVariant(session.current) && !isUnratedMatrix(session.current) ? [session.current.taskFamily] : [])])].map((family) => ({ id: family, name: familyName(family), level: session.familyLevels?.[family] ?? 1 })),
     };
   });
   const total = (key) => sections.reduce((sum, section) => sum + section[key], 0);
-  return { elapsedMs: elapsed, plannedMs: session.totalMs, sections, ...scoreSummary(session),
+  return { elapsedMs: elapsed, plannedMs: session.totalMs, sections, ...scoreSummary(session), ...(unrated ? { unrated } : {}),
     correct: total('correct'), incorrect: total('incorrect'), skipped: total('skipped'),
     unanswered: total('unanswered'), attempted: total('attempted'),
     accuracy: total('attempted') ? total('correct') / total('attempted') : null };
@@ -305,9 +312,12 @@ export function isValidSession(value) {
   const validSnapshot = (record) => {
     if (value.version < 3) return true;
     const question = record.generatedQuestion ?? record.questionSnapshot;
-    return validStoredQuestion(question) && question.id === record.questionId && question.type === record.type && question.category === record.category && taskFamily(question) === record.taskFamily;
+    return validStoredQuestion(question) && question.id === record.questionId && question.type === record.type && question.category === record.category && taskFamily(question) === record.taskFamily
+      && (!(isUnratedMatrix(question) || isMatrixVariant(question) || isUnratedMatrix(record) || isMatrixVariant(record)) || value.practiceMode === 'north' && question.sourceId === record.sourceId && presentedLevel(value, question) === record.presentedLevel);
   };
-  const validQuestion = (q) => q && validString(q.questionId) && validString(q.sourceId) && CATEGORIES.some((c) => c.id === q.category) && ['choice', 'construction', 'memory-grid', 'memory-digits', 'memory-binding', 'folding-video', 'folding-choice', 'memory-positions', 'memory-recognition', 'memory-symmetry'].includes(q.type) && validLevel(q.presentedLevel) && validOrder(q.choicesOrder) && validGenerated(q.generatedQuestion) && validSnapshot(q) && (value.version < 3 || validFamily(q.taskFamily));
+  const validQuestion = (q) => q && validString(q.questionId) && validString(q.sourceId) && CATEGORIES.some((c) => c.id === q.category) && ['choice', 'construction', 'memory-grid', 'memory-digits', 'memory-binding', 'folding-video', 'folding-choice', 'memory-positions', 'memory-recognition', 'memory-symmetry'].includes(q.type) && (isUnratedMatrix(q) ? value.version >= 3 && q.presentedLevel === null : validLevel(q.presentedLevel)) && validOrder(q.choicesOrder) && validGenerated(q.generatedQuestion) && validSnapshot(q) && (value.version < 3 || validFamily(q.taskFamily));
+  const validTargets = (r) => isUnratedMatrix(r) ? r.levelBefore === null && r.levelAfter === null
+    : isMatrixVariant(r) ? r.levelBefore === 4 && r.levelAfter === 4 : validLevel(r.levelBefore) && validLevel(r.levelAfter);
   if (!value || typeof value !== 'object' || ![1, 2, 3].includes(value.version) || !validString(value.id) || value.id.length > 200) return false;
   if (!['running', 'paused', 'completed', 'stopped'].includes(value.status)) return false;
   if (value.scoreRuleVersion !== undefined && value.scoreRuleVersion !== SCORE_RULE_VERSION) return false;
@@ -323,7 +333,7 @@ export function isValidSession(value) {
   if (value.sectionIndex === 4 && value.status !== 'completed') return false;
   if (!value.levels || !CATEGORIES.every((c) => validLevel(value.levels[c.id]))) return false;
   if (!Array.isArray(value.responses) || value.responses.length > 20000) return false;
-  if (!value.responses.every((r) => validQuestion(r) && validScoreFields(r) && ['correct', 'incorrect', 'skipped', 'unanswered'].includes(r.status) && validTime(r.timeMs) && validTime(r.elapsedAtAnswer) && validDate(r.answeredAt) && validLevel(r.levelBefore) && validLevel(r.levelAfter) && validAnswer(r.answer) && [true, false, null].includes(r.correct))) return false;
+  if (!value.responses.every((r) => validQuestion(r) && validScoreFields(r) && ['correct', 'incorrect', 'skipped', 'unanswered'].includes(r.status) && validTime(r.timeMs) && validTime(r.elapsedAtAnswer) && validDate(r.answeredAt) && validTargets(r) && validAnswer(r.answer) && [true, false, null].includes(r.correct))) return false;
   if (value.current !== null && (!validQuestion(value.current) || !validScoreFields(value.current, true) || !validTime(value.current.askedAtElapsed) || typeof value.current.answered !== 'boolean' || !validAnswer(value.current.draft) || value.current.presentationAtElapsed !== null && !validTime(value.current.presentationAtElapsed))) return false;
   return true;
 }
