@@ -130,6 +130,7 @@ function home() {
   const counts = (id) => !selectedBank ? '准备中' : practiceMode === 'north' && id === 'memory' ? '按档位随机生成' : `${number(selectedBank.categories[id].length)} 道题`;
   return shell(`
     ${profileSummary()}
+    <p class="matrix-home-entry"><a class="secondary" href="matrix.html">矩阵补充练习 →</a></p>
     ${pending ? `<section class="resume-banner"><div><strong>还有一段练习，可以接着完成</strong><p>${dateLabel(pending.startedAt)}开始 · ${esc(modeName(pending))} · 已练习 ${duration(pending.elapsedMs)}</p></div><div class="button-row"><button class="ghost" data-action="stop-pending" data-id="${esc(pending.id)}">结束这次</button><button class="primary" data-action="resume" data-id="${esc(pending.id)}">继续练习 ${arrow}</button></div></section>` : ''}
     ${loadError ? `<div class="error-banner">${esc(loadError)} <button class="ghost" data-action="reload">重新加载</button></div>` : ''}
     ${storageError ? `<div class="error-banner">${esc(storageError)}</div>` : ''}

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="robots" content="noindex">
+  <title>矩阵补充练习 · 思维练习室</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="matrix.css">
+  <script type="module" src="matrix.js"></script>
+</head>
+<body>
+  <div class="wrap matrix-wrap">
+    <header class="matrix-header"><a href="./" class="secondary">← 思维练习室</a><span id="matrix-owner" class="quiet"></span></header>
+    <main>
+      <div id="matrix-content" aria-busy="true"><p>正在读取本机题包…</p></div>
+      <p id="matrix-error" class="error-banner" role="alert" hidden></p>
+      <input id="matrix-file" type="file" accept=".json,application/json" aria-label="选择矩阵题包" hidden>
+    </main>
+    <footer class="footer">题包和作答记录保存在当前浏览器。</footer>
+  </div>
+</body>
+</html>

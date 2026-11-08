@@ -1,0 +1,28 @@
+.matrix-wrap { max-width: 880px; }
+.matrix-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 24px 0; }
+.matrix-heading { margin: 18px 0 28px; }
+.matrix-heading h1 { margin: 8px 0; font-size: clamp(28px, 6vw, 46px); line-height: 1.25; text-wrap: balance; }
+.matrix-heading .lead { margin: 0; text-wrap: pretty; }
+.matrix-sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.matrix-card { min-width: 0; background: white; padding: clamp(16px, 4vw, 26px); border-radius: 16px; box-shadow: var(--shadow); }
+.matrix-card h1, .matrix-card h2 { font-size: clamp(19px, 4vw, 24px); text-wrap: balance; }
+.matrix-card .quiet { margin: 7px 0 14px; text-wrap: pretty; }
+.matrix-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 12px; }
+.matrix-toolbar span, .matrix-progress { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.matrix-progress { margin-bottom: 14px; }
+.matrix-export { margin-top: 18px; }
+.matrix-stem, .matrix-sheet { margin: 16px auto; text-align: center; }
+.matrix-stem img, .matrix-sheet img { width: min(100%, 370px); height: auto; vertical-align: middle; }
+.matrix-choices { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 15px 0; }
+.matrix-choice { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 6px; min-height: 44px; min-width: 0; padding: 8px; }
+.matrix-choice img { display: block; width: 100%; height: clamp(48px, 13vw, 90px); object-fit: contain; }
+.matrix-choice[aria-pressed="true"] { outline: 2px solid var(--green); outline-offset: -2px; }
+.matrix-choice.is-correct, .matrix-feedback.is-correct { background: #e7f1e1; color: #315d3e; }
+.matrix-choice.is-wrong, .matrix-feedback.is-wrong { background: #f7e9e4; color: #8c3829; }
+.matrix-choice:disabled { opacity: 1; }
+.matrix-feedback { padding: 10px 14px; border-radius: 8px; margin: 12px 0; font-size: 14px; }
+.matrix-wrap #matrix-error { margin-top: 16px; }
+@media (max-width: 560px) {
+  .matrix-sections { grid-template-columns: 1fr; }
+  .matrix-choices-pictures { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
