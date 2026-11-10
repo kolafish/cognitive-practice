@@ -8,7 +8,7 @@ for (const id of ['figure', 'memory', 'spatial', 'verbal']) {
   if (!bank.categories[id]?.length) throw new Error(`Missing category: ${id}`);
   if (!Array.isArray(practiceBank.categories[id]) || id !== 'memory' && !practiceBank.categories[id].length) throw new Error(`Missing main-practice category: ${id}`);
 }
-const modules = ['app.js', 'engine.js', 'storage.js', 'practice.js', 'profiles.js', 'scoring.js', 'matrix.js', 'matrix-pack.js'];
+const modules = ['app.js', 'engine.js', 'storage.js', 'practice.js', 'profiles.js', 'scoring.js', 'matrix.js', 'matrix-pack.js', 'figure-pack.js'];
 const files = [...modules, 'styles.css', 'matrix.css', 'data/practice-bank.json'];
 const source = new Map(await Promise.all(files.map(async (path) => [path, await readFile(new URL(`public/${path}`, root), 'utf8')])));
 const release = createHash('sha256').update([...source.values()].join('\n')).digest('hex').slice(0, 12);

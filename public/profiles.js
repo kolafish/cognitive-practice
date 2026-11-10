@@ -1,4 +1,4 @@
-import { createSession, chooseQuestion, parseBackup } from './engine.js';
+import { createSession, chooseQuestion, parseBackup, trainingDurations } from './engine.js';
 import { taskFamily, generateVisualMemory, generatedMemorySignature, isMatrixVariant, isUnratedMatrix } from './practice.js';
 
 export function usernameIdentity(value) {
@@ -78,6 +78,8 @@ export function rememberSession(profile, session, resolve = (r) => r.generatedQu
 }
 export function createUserSession(profile, minutes, mode, now = Date.now(), id = crypto.randomUUID()) {
   const session = createSession(minutes, now, id, mode);
+  session.sectionDurationsMs = trainingDurations(session.totalMs);
+  session.timingScheme = 'figure-focus-7-2-3-3';
   session.userId = profile.id; session.username = profile.username; session.reviewCategories = [];
   session.familyLevels = Object.fromEntries(Object.entries(profile.levels[mode]).map(([family, state]) => [family, state.level]));
   return session;
@@ -104,7 +106,7 @@ export function selectNorthFigure(pool, supplement, session, profile, standalone
   const sandia = available.filter(isUnratedMatrix);
   if (sandia.length && unrated < Math.floor((figures.length - unrated) / 4)) return sandia[Math.floor(random() * sandia.length)];
   const lastRated = figures.findLast((record) => !isUnratedMatrix(record));
-  if (session.familyLevels['matrix-choice'] === 4 && original?.familyLevel !== 4
+  if (session.familyLevels['matrix-choice'] === 4 && (!original || taskFamily(original) === 'matrix-choice') && original?.familyLevel !== 4
       && (!original || !isMatrixVariant(lastRated)) && !session.reviewCategories?.includes('figure')) {
     const stems = new Set(figures.map((record) => record.questionSnapshot?.matrixVariantOf ?? record.questionId));
     const variants = available.filter((q) => isMatrixVariant(q) && !stems.has(q.matrixVariantOf));

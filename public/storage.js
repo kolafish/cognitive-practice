@@ -141,10 +141,11 @@ export function saveCheckpoint(session) {
 export function readPreferences(userId = null) {
   try {
     const value = JSON.parse(localStorage.getItem(preferenceKey(userId)));
-    return { minutes: Number.isInteger(value?.minutes) && value.minutes >= 4 && value.minutes <= 180 ? value.minutes : 60,
+    const minutes = value?.minutes === 40 && value?.timingScheme !== 'figure-focus-7-2-3-3' ? 50 : value?.minutes;
+    return { minutes: Number.isInteger(minutes) && minutes >= 4 && minutes <= 180 ? minutes : 50,
       mode: ['north','extended'].includes(value?.mode) ? value.mode : 'north' };
-  } catch { return { minutes: 60, mode: 'north' }; }
+  } catch { return { minutes: 50, mode: 'north' }; }
 }
-export function savePreferences(value, userId = null) { localStorage.setItem(preferenceKey(userId), JSON.stringify(value)); }
+export function savePreferences(value, userId = null) { localStorage.setItem(preferenceKey(userId), JSON.stringify({ ...value, timingScheme: 'figure-focus-7-2-3-3' })); }
 export function readActiveUser() { try { const id = localStorage.getItem(ACTIVE_USER_KEY); return validUserId(id) ? id : null; } catch { return null; } }
 export function saveActiveUser(id) { if (id) localStorage.setItem(ACTIVE_USER_KEY, id); else localStorage.removeItem(ACTIVE_USER_KEY); }

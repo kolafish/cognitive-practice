@@ -92,7 +92,8 @@ test('North records variants as review and Sandia without a level or points, inc
   const remembered = rememberSession(profile, answered);
   assert.deepEqual(remembered.levels.north, {});
   assert.deepEqual(remembered.seenQuestions, [questionIdentity(variant), questionIdentity(sandia)]);
-  const timedOut = advanceSession(session, 800000);
+  const deadline = session.sectionDurationsMs[0];
+  const timedOut = advanceSession(session, deadline);
   assert.ok(isValidSession(timedOut));
-  assert.equal(summarize(timedOut, 800000).unrated.unanswered, 1);
+  assert.equal(summarize(timedOut, deadline).unrated.unanswered, 1);
 });

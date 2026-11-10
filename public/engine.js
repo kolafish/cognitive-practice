@@ -1,5 +1,5 @@
 import { SCORE_RULE_VERSION, scoreFields, validScoreFields, scoreSummary } from './scoring.js';
-import { taskFamily, targetLevel, presentedLevel, validVisualMemory, validStoredQuestion, familyName, chooseFamily, isMatrixVariant, isUnratedMatrix } from './practice.js';
+import { taskFamily, targetLevel, presentedLevel, validVisualMemory, validStoredQuestion, familyName, chooseFamily, isMatrixVariant, isUnratedMatrix, maximumLevel } from './practice.js';
 
 export const CATEGORIES = [
   { id: 'figure', name: '图形规律', short: '图形', number: '01', description: '观察变化，发现图形之间的规律。' },
@@ -9,12 +9,13 @@ export const CATEGORIES = [
 ];
 export const MAX_LEVEL = 8;
 export const MEMORY_DISPLAY_MS = 1000;
-export const TRAINING_WEIGHTS = [4, 2, 3, 3];
+export const TRAINING_WEIGHTS = [7, 2, 3, 3];
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const copy = (value) => structuredClone(value);
 
-export function trainingDurations(totalMs) {
-  const durations = TRAINING_WEIGHTS.slice(0, -1).map((weight) => Math.round(totalMs * weight / 12));
+export function trainingDurations(totalMs, weights = TRAINING_WEIGHTS) {
+  const sum = weights.reduce((total, weight) => total + weight, 0);
+  const durations = weights.slice(0, -1).map((weight) => Math.round(totalMs * weight / sum));
   return [...durations, totalMs - durations.reduce((sum, duration) => sum + duration, 0)];
 }
 
@@ -48,7 +49,9 @@ export function createSession(minutes, now = Date.now(), id = crypto.randomUUID(
   return {
     version: practiceMode ? 3 : 2, id, status: 'running', startedAt: new Date(now).toISOString(), updatedAt: now,
     ...(practiceMode ? { practiceMode, familyLevels: {}, scoreRuleVersion: SCORE_RULE_VERSION } : {}),
-    finishedAt: null, totalMs, sectionDurationsMs: trainingDurations(totalMs),
+    // Keep the legacy constructor contract for stored-session tooling. The user
+    // session factory explicitly selects the current schedule for new practice.
+    finishedAt: null, totalMs, sectionDurationsMs: trainingDurations(totalMs, [4, 2, 3, 3]),
     memoryDisplayMs: MEMORY_DISPLAY_MS, elapsedMs: 0, anchorAt: now,
     sectionIndex: 0, levels: Object.fromEntries(CATEGORIES.map((c) => [c.id, 1])),
     responses: [], current: null,
@@ -249,7 +252,7 @@ export function submitAnswer(session, question, answer, now = Date.now(), skippe
   const correct = !skipped && gradeAnswer(question, answer);
   const before = targetLevel(next, question);
   const adapts = !isUnratedMatrix(question) && !isMatrixVariant(question);
-  const after = adapts ? clamp(before + (correct ? 1 : -1), 1, MAX_LEVEL) : before;
+  const after = adapts ? clamp(before + (correct ? 1 : -1), 1, maximumLevel(question)) : before;
   const response = {
     questionId: question.id, category: question.category, type: question.type,
     sourceId: question.sourceId, groupId: question.groupId ?? null,
@@ -325,8 +328,10 @@ export function isValidSession(value) {
   if (value.reviewCategories !== undefined && (!Array.isArray(value.reviewCategories) || value.reviewCategories.length > 4 || !value.reviewCategories.every((id) => CATEGORIES.some((c) => c.id === id)))) return false;
   if (!validDate(value.startedAt) || !Number.isFinite(value.updatedAt) || value.finishedAt !== null && !validDate(value.finishedAt)) return false;
   if (!Number.isFinite(value.totalMs) || value.totalMs < 240000 || value.totalMs > 10800000) return false;
+  if (value.timingScheme !== undefined && (value.version < 3 || value.timingScheme !== 'figure-focus-7-2-3-3')) return false;
   if (value.version === 1 && value.sectionMs !== value.totalMs / 4) return false;
-  if (value.version >= 2 && (!Array.isArray(value.sectionDurationsMs) || value.sectionDurationsMs.length !== 4 || !value.sectionDurationsMs.every((duration, i) => duration === trainingDurations(value.totalMs)[i]) || value.memoryDisplayMs !== MEMORY_DISPLAY_MS)) return false;
+  const expectedDurations = trainingDurations(value.totalMs, value.timingScheme === 'figure-focus-7-2-3-3' ? TRAINING_WEIGHTS : [4, 2, 3, 3]);
+  if (value.version >= 2 && (!Array.isArray(value.sectionDurationsMs) || value.sectionDurationsMs.length !== 4 || !value.sectionDurationsMs.every((duration, i) => duration === expectedDurations[i]) || value.memoryDisplayMs !== MEMORY_DISPLAY_MS)) return false;
   if (value.version === 3 && (!['north', 'extended'].includes(value.practiceMode) || !value.familyLevels || Array.isArray(value.familyLevels) || typeof value.familyLevels !== 'object' || Object.keys(value.familyLevels).length > 100 || !Object.entries(value.familyLevels).every(([family, level]) => validFamily(family) && validLevel(level)))) return false;
   if (!validTime(value.elapsedMs) || value.status === 'running' && !Number.isFinite(value.anchorAt)) return false;
   if (!Number.isInteger(value.sectionIndex) || value.sectionIndex < 0 || value.sectionIndex > 4) return false;
