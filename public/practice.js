@@ -17,6 +17,8 @@ export const isUnratedMatrix = (q) => q?.sourceId === 'local-sandia';
 export const isPrivateMatrixAsset = (path) => typeof path === 'string' && /^private-matrix\/[a-z0-9-]{1,80}\/[a-z0-9-]{1,80}\.png$/.test(path);
 export const isPrivateFigureAsset = (path) => typeof path === 'string' && /^private-figure\/[a-z0-9-]{1,80}\/[a-z0-9-]{1,80}\.png$/.test(path);
 export const maximumLevel = (question) => question?.sourceId === 'local-figure-rules' ? 4 : 8;
+export const validFigureRuleIds = (rules) => Array.isArray(rules) && rules.length > 0 && rules.length <= 6
+  && new Set(rules).size === rules.length && rules.every((rule) => typeof rule === 'string' && /^[a-z][a-z0-9-]{0,79}$/.test(rule));
 
 export function taskFamily(question) {
   if (typeof question.taskFamily === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9:_-]{0,99}$/.test(question.taskFamily) && !['constructor', 'prototype'].includes(question.taskFamily)) return question.taskFamily;
@@ -169,6 +171,13 @@ export function validVisualMemory(question) {
 }
 
 export function validStoredQuestion(question) {
+  if (question?.ruleReinforcement !== undefined) {
+    const followup = question.ruleReinforcement;
+    if (question.sourceId !== 'local-figure-rules' || !followup || followup.version !== 1
+        || typeof followup.triggerQuestionId !== 'string' || !/^local-figure-[a-z0-9][a-z0-9-]{0,79}$/.test(followup.triggerQuestionId)
+        || followup.triggerQuestionId === question.id || !validFigureRuleIds(question.ruleIds)
+        || !validFigureRuleIds(followup.ruleIds) || !followup.ruleIds.every((rule) => question.ruleIds.includes(rule))) return false;
+  }
   if (validVisualMemory(question)) return true;
   if (!question || !['figure', 'memory', 'spatial', 'verbal'].includes(question.category)) return false;
   if (typeof question.id !== 'string' || question.id.length > 200 || typeof question.sourceId !== 'string' || question.sourceId.length > 200) return false;
@@ -185,6 +194,7 @@ export function validStoredQuestion(question) {
       || question.familyMaxLevel !== 4 || question.familyLevel !== question.level || question.level > 4
       || question.choicesEmbedded !== true || question.choices?.length !== 4 || !question.choices.every((c, i) => c.id === 'ABCD'[i])
       || typeof question.explanation !== 'string' || question.explanation.length > 4000
+      || question.ruleIds !== undefined && !validFigureRuleIds(question.ruleIds)
       || !Array.isArray(question.ruleTags) || !question.ruleTags.length || question.ruleTags.length > 6
       || !question.ruleTags.every((tag) => typeof tag === 'string' && tag.length <= 100))) return false;
   if (variant || unrated) {

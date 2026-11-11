@@ -1,5 +1,5 @@
-import { createSession, chooseQuestion, parseBackup, trainingDurations } from './engine.js';
-import { taskFamily, generateVisualMemory, generatedMemorySignature, isMatrixVariant, isUnratedMatrix } from './practice.js';
+import { createSession, chooseQuestion, parseBackup, trainingDurations, sectionTiming } from './engine.js';
+import { taskFamily, generateVisualMemory, generatedMemorySignature, isMatrixVariant, isUnratedMatrix, validFigureRuleIds } from './practice.js';
 
 export function usernameIdentity(value) {
   const username = String(value ?? '').normalize('NFKC').trim().replace(/\s+/gu, ' ');
@@ -95,7 +95,49 @@ export function selectUserQuestion(pool, session, profile, random = Math.random)
   return chooseQuestion(candidates, session, category, {}, random);
 }
 
+export function selectRuleReinforcement(pool, session, profile, random = Math.random) {
+  if (session.version !== 3 || session.practiceMode !== 'north' || session.status !== 'running'
+      || session.sectionIndex !== 0 || session.elapsedMs >= sectionTiming(session, 0).end
+      || session.reviewCategories?.includes('figure') || session.current && !session.current.answered) return null;
+  const last = session.responses.at(-1), previous = last?.questionSnapshot;
+  if (last?.status !== 'incorrect' || last.sourceId !== 'local-figure-rules'
+      || previous?.sourceId !== 'local-figure-rules' || previous.ruleReinforcement
+      || !validFigureRuleIds(previous.ruleIds)) return null;
+
+  // The first tag is the main rule. Sharing only an incidental tag (such as
+  // curves on an intersection-counting question) is not enough for consolidation.
+  const primaryRule = previous.ruleIds[0];
+  const records = [...session.responses, ...(session.current ? [session.current] : [])];
+  const usedIds = new Set(records.map((r) => r.questionId));
+  const snapshots = records.map((r) => r.questionSnapshot).filter(Boolean);
+  const usedSources = new Set(snapshots.map(questionIdentity));
+  const usedGroups = new Set(snapshots.map(groupIdentity).filter(Boolean));
+  let candidates = unseenQuestions(pool, profile).filter((q) => q.sourceId === 'local-figure-rules'
+    && validFigureRuleIds(q.ruleIds) && q.ruleIds.includes(primaryRule)
+    && !usedIds.has(q.id) && !usedSources.has(questionIdentity(q)) && !usedGroups.has(groupIdentity(q)));
+  if (!candidates.length) return null;
+
+  // Follow the lowered target; if that level is exhausted, use the nearest
+  // available level. Prefer the lower one on ties, then the closest rule mix.
+  const distance = (q) => Math.abs(q.familyLevel - last.levelAfter);
+  const nearest = Math.min(...candidates.map(distance));
+  candidates = candidates.filter((q) => distance(q) === nearest);
+  const level = Math.min(...candidates.map((q) => q.familyLevel));
+  candidates = candidates.filter((q) => q.familyLevel === level);
+  const overlap = (q) => previous.ruleIds.filter((rule) => q.ruleIds.includes(rule));
+  const mostShared = Math.max(...candidates.map((q) => overlap(q).length));
+  candidates = candidates.filter((q) => overlap(q).length === mostShared);
+  const fewestExtras = Math.min(...candidates.map((q) => q.ruleIds.length - mostShared));
+  candidates = candidates.filter((q) => q.ruleIds.length - mostShared === fewestExtras);
+  const question = candidates[Math.floor(random() * candidates.length)];
+  // Persist the link in the existing question snapshot, so reloads/backups keep
+  // the one-follow-up limit without a second queue or a profile migration.
+  return { ...question, ruleReinforcement: { version: 1, triggerQuestionId: last.questionId, ruleIds: overlap(question) } };
+}
+
 export function selectNorthFigure(pool, supplement, session, profile, standaloneSeen = new Set(), random = Math.random) {
+  const reinforcement = selectRuleReinforcement(pool, session, profile, random);
+  if (reinforcement) return reinforcement;
   const original = selectUserQuestion(pool, session, profile, random);
   if (!supplement.length) return original;
   const seenIds = new Set(session.responses.map((record) => record.questionId));
