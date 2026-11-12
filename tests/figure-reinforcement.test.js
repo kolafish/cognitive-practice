@@ -41,13 +41,39 @@ test('match the detailed main rule, not the broad family or an incidental shared
   const state = answered(question('trigger', 2, ['points', 'curves']));
   const sameFamily = question('regions', 1, ['regions']);
   const incidental = question('curves', 1, ['curves'], 'figure-attribute');
+  const reversed = question('reversed', 1, ['curves', 'points'], 'figure-attribute');
   const primaryOnly = question('points', 1, ['points']);
   const combo = question('combo', 1, ['points', 'curves']);
   const extra = question('extra', 1, ['points', 'curves', 'rotation']);
-  assert.equal(pick([sameFamily, incidental, primaryOnly, extra, combo], state).id, combo.id);
-  assert.equal(pick([incidental, primaryOnly], state).id, primaryOnly.id);
-  assert.equal(pick([sameFamily, incidental], state), null);
+  assert.equal(pick([sameFamily, incidental, reversed, primaryOnly, extra, combo], state).id, combo.id);
+  assert.equal(pick([incidental, reversed, primaryOnly], state).id, primaryOnly.id);
+  assert.equal(pick([sameFamily, incidental, reversed], state), null);
   assert.equal(selectNorthFigure([incidental], [], state.session, state.profile).id, incidental.id);
+});
+
+test('a closer incidental counting tag cannot replace a matching main-rule consolidation', () => {
+  const state = answered(question('counting', 1, ['elements']));
+  const incidental = question('curved-symbols', 1, ['curves', 'elements'], 'figure-attribute');
+  const sameFamily = question('counted-lines', 1, ['lines', 'elements']);
+  const matching = question('counting-two', 2, ['elements']);
+  for (const pool of [[incidental, sameFamily, matching], [matching, sameFamily, incidental]]) {
+    assert.equal(pick(pool, state).id, matching.id, 'main-rule identity comes before level distance');
+  }
+  assert.equal(pick([incidental, sameFamily], state), null, 'never fall back to an incidental match');
+  const ordinary = selectNorthFigure([incidental], [], state.session, state.profile);
+  assert.equal(ordinary.id, incidental.id);
+  assert.equal(ordinary.ruleReinforcement, undefined, 'normal rotation remains available without a suitable follow-up');
+});
+
+test('previously saved incidental matches remain readable and do not trigger another follow-up', () => {
+  const state = answered(question('counting', 1, ['elements']));
+  const oldFollowup = { ...question('old-match', 1, ['curves', 'elements'], 'figure-attribute'),
+    ruleReinforcement: { version: 1, triggerQuestionId: state.q.id, ruleIds: ['elements'] } };
+  const saved = submitAnswer(beginQuestion(state.session, oldFollowup, 1001), oldFollowup, 'A', 2000).session;
+  const restored = parseUserBackup(JSON.stringify(userBackup([saved], rememberSession(state.profile, saved))));
+  assert.deepEqual(restored.sessions[0].responses.at(-1).questionSnapshot.ruleReinforcement, oldFollowup.ruleReinforcement);
+  assert.equal(selectRuleReinforcement([question('curves', 1, ['curves'], 'figure-attribute')],
+    resumeSession(restored.sessions[0], 3000), restored.profiles[0]), null);
 });
 
 test('consolidation follows the lowered target, using the nearest available level without jumping to a hard exact combo', () => {

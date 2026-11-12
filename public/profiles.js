@@ -104,8 +104,8 @@ export function selectRuleReinforcement(pool, session, profile, random = Math.ra
       || previous?.sourceId !== 'local-figure-rules' || previous.ruleReinforcement
       || !validFigureRuleIds(previous.ruleIds)) return null;
 
-  // The first tag is the main rule. Sharing only an incidental tag (such as
-  // curves on an intersection-counting question) is not enough for consolidation.
+  // Both questions must have the same first (main) rule. An incidental tag on
+  // either side must not override this, even if its difficulty is closer.
   const primaryRule = previous.ruleIds[0];
   const records = [...session.responses, ...(session.current ? [session.current] : [])];
   const usedIds = new Set(records.map((r) => r.questionId));
@@ -113,7 +113,7 @@ export function selectRuleReinforcement(pool, session, profile, random = Math.ra
   const usedSources = new Set(snapshots.map(questionIdentity));
   const usedGroups = new Set(snapshots.map(groupIdentity).filter(Boolean));
   let candidates = unseenQuestions(pool, profile).filter((q) => q.sourceId === 'local-figure-rules'
-    && validFigureRuleIds(q.ruleIds) && q.ruleIds.includes(primaryRule)
+    && validFigureRuleIds(q.ruleIds) && q.ruleIds[0] === primaryRule
     && !usedIds.has(q.id) && !usedSources.has(questionIdentity(q)) && !usedGroups.has(groupIdentity(q)));
   if (!candidates.length) return null;
 
